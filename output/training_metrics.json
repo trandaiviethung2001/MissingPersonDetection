@@ -70,10 +70,12 @@
     "separation_gap": -0.009884651750326157
   },
   "threshold_tuning": {
-    "optimal_threshold": 0.1,
+    "optimal_threshold": 0.2,
+    "best_f1": 0.875,
     "best_accuracy": 0.9444444444444444,
+    "recall": 0.7777777777777778,
     "config_threshold": 0.4,
-    "auc": 0.0
+    "auc": 0.9897119341563786
   },
   "embeddings_file": {
     "path": "/Users/heung-ebit/Desktop/EdgeSystem/MissingPersonDetection/missing_persons_db/embeddings.pkl",
