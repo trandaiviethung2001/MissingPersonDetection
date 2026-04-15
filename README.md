@@ -164,17 +164,17 @@ Training was performed using the `train_face_recognition.ipynb` notebook on a da
 |--------|---------------|----------------|-------|
 | Morgan Freeman | 0.552 | 0.465 | 3 |
 | Keanu Reeves | 0.245 | 0.038 | 3 |
-| Scarlett Johansson | 0.784 | 0.681 | 3 |
-| **Overall** | **0.527** | **0.038** | **9** |
+| Scarlett Johansson | 0.643 | 0.616 | 3 |
+| **Overall** | **0.480** | **0.038** | **9** |
 
 **Inter-person similarity** (different persons, lower is better):
 
 | Pair | Avg Similarity | Max Similarity |
 |------|---------------|----------------|
 | Morgan Freeman vs Keanu Reeves | -0.007 | 0.048 |
-| Morgan Freeman vs Scarlett Johansson | 0.001 | 0.046 |
-| Keanu Reeves vs Scarlett Johansson | -0.016 | 0.035 |
-| **Overall** | **-0.007** | **0.048** |
+| Morgan Freeman vs Scarlett Johansson | -0.005 | 0.046 |
+| Keanu Reeves vs Scarlett Johansson | -0.028 | 0.035 |
+| **Overall** | **-0.013** | **0.048** |
 
 > **Note:** Inter-person similarity is near zero across all pairs, indicating excellent separation between identities. Keanu Reeves has lower intra-person similarity due to significant appearance variation across photos (different years, angles, facial hair).
 
@@ -208,7 +208,7 @@ The left plot shows accuracy, TPR, precision, and F1 score across different thre
 ### Key Takeaways
 
 - **Inter-person separation is excellent**: max inter-person similarity (0.048) is far below the recognition threshold (0.4), meaning false positives are unlikely
-- **Intra-person consistency varies**: Scarlett Johansson's embeddings are highly consistent (avg 0.784), while Keanu Reeves shows more variation (avg 0.245) due to appearance changes across years
+- **Intra-person consistency varies**: Scarlett Johansson's embeddings are consistent (avg 0.643), while Keanu Reeves shows more variation (avg 0.245) due to appearance changes across years
 - **Cosine similarity matching** (threshold-based) is the primary recognition method; SVM/KNN classifiers serve as optional alternatives
 - Adding more reference photos per person (especially with diverse angles/lighting) improves intra-person similarity and overall robustness
 
