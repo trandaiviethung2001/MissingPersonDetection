@@ -87,7 +87,6 @@ Key dependencies:
 - `insightface` - ArcFace face detection + recognition (512-d embeddings)
 - `onnxruntime` - Runtime for InsightFace models
 - `opencv-python` - Image/video processing
-- `scikit-learn` - SVM/KNN classifier training (optional)
 
 ## Usage
 
@@ -125,7 +124,6 @@ The notebook will:
 3. Evaluate embedding quality (intra/inter-person cosine similarity)
 4. Find optimal recognition threshold (ROC curve)
 5. Save `embeddings.pkl`
-6. (Optional) Train SVM/KNN classifier
 
 ### Step 3: Run detection
 
@@ -191,7 +189,6 @@ MissingPersonDetection/
     person_detector.py         # YOLO person detection
     face_detector.py           # InsightFace face detection
     face_recognizer.py         # ArcFace recognition & matching
-  models/                      # Model weights (SVM/KNN)
   output/                      # Output results
 ```
 
@@ -264,20 +261,11 @@ The histogram shows clear separation between intra-person (blue) and inter-perso
 
 The left plot shows accuracy, TPR, precision, and F1 score across different threshold values. The right plot shows the ROC curve.
 
-### Classifier Performance (Leave-One-Out Cross-Validation)
-
-| Classifier | Accuracy | Std Dev | Samples | Classes |
-|------------|----------|---------|---------|---------|
-| **SVM** (RBF kernel) | 88.9% | ±31.4% | 9 | 3 |
-| **KNN** (k=3, distance-weighted) | 100.0% | ±0.0% | 9 | 3 |
-
-> **Note:** High variance in SVM is expected with only 9 samples and leave-one-out cross-validation. KNN achieves perfect accuracy due to the well-separated embedding clusters. With more training data, both classifiers would stabilize.
-
 ### Key Takeaways
 
 - **Inter-person separation is excellent**: max inter-person similarity (0.048) is far below the recognition threshold (0.4), meaning false positives are unlikely
 - **Intra-person consistency varies**: Scarlett Johansson's embeddings are consistent (avg 0.643), while Keanu Reeves shows more variation (avg 0.245) due to appearance changes across years
-- **Cosine similarity matching** (threshold-based) is the primary recognition method; SVM/KNN classifiers serve as optional alternatives
+- **Cosine similarity matching** (threshold-based) is the recognition method — no classifier training needed, and new persons can be added to the database instantly without retraining
 - Adding more reference photos per person (especially with diverse angles/lighting) improves intra-person similarity and overall robustness
 
 ## Comparison: InsightFace vs dlib

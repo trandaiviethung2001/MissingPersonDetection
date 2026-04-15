@@ -19,7 +19,7 @@ COPY detect_missing_person.py .
 COPY utils/ utils/
 COPY yolov8n.pt .
 
-RUN mkdir -p missing_persons_db models output
+RUN mkdir -p missing_persons_db output
 
 # Pre-download InsightFace model
 RUN python -c "from insightface.app import FaceAnalysis; \

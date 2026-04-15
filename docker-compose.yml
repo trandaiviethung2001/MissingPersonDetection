@@ -21,7 +21,6 @@ services:
     image: missing-person-detection
     volumes:
       - ./missing_persons_db:/app/missing_persons_db
-      - ./models:/app/models
       - ./output:/app/output
       - ./train_face_recognition.ipynb:/app/train_face_recognition.ipynb
     entrypoint: ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]

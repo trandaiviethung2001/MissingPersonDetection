@@ -5,7 +5,6 @@ __pycache__/
 .gitignore
 output/
 videos/
-models/
 *.md
 LICENSE
 .dockerignore

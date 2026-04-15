@@ -75,20 +75,6 @@
     "config_threshold": 0.4,
     "auc": 0.0
   },
-  "classifier": {
-    "svm": {
-      "cv_mean": 0.8888888888888888,
-      "cv_std": 0.3142696805273545,
-      "n_samples": 9,
-      "n_classes": 3
-    },
-    "knn": {
-      "cv_mean": 1.0,
-      "cv_std": 0.0,
-      "n_samples": 9,
-      "n_classes": 3
-    }
-  },
   "embeddings_file": {
     "path": "/Users/heung-ebit/Desktop/EdgeSystem/MissingPersonDetection/missing_persons_db/embeddings.pkl",
     "size_kb": 18.57421875

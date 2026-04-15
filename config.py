@@ -9,7 +9,6 @@ MISSING_PERSONS_DB_DIR = os.path.join(BASE_DIR, "missing_persons_db")
 EMBEDDINGS_FILE = os.path.join(MISSING_PERSONS_DB_DIR, "embeddings.pkl")
 YOLO_MODEL_PATH = "yolov8n.pt"  # Auto-downloads if not found
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
 YOLO_CONFIDENCE_THRESHOLD = 0.5
 YOLO_PERSON_CLASS_ID = 0  # COCO class 0 = "person"
 INSIGHTFACE_MODEL = "buffalo_l"
