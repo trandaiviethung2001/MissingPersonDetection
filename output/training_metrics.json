@@ -1,0 +1,96 @@
+{
+  "database": {
+    "total_persons": 3,
+    "total_embeddings": 9,
+    "persons": [
+      {
+        "name": "Morgan Freeman",
+        "person_id": "person_001",
+        "n_embeddings": 3,
+        "n_failed": 0
+      },
+      {
+        "name": "Keanu Reeves",
+        "person_id": "person_002",
+        "n_embeddings": 3,
+        "n_failed": 0
+      },
+      {
+        "name": "Scarlett Johansson",
+        "person_id": "person_003",
+        "n_embeddings": 3,
+        "n_failed": 0
+      }
+    ]
+  },
+  "embedding_quality": {
+    "intra_person": {
+      "mean": 0.5272154211997986,
+      "min": 0.03780073672533035,
+      "max": 0.9867041110992432,
+      "std": 0.2824382781982422,
+      "details": {
+        "Morgan Freeman": {
+          "avg": 0.5519415736198425,
+          "min": 0.46488165855407715,
+          "pairs": 3
+        },
+        "Keanu Reeves": {
+          "avg": 0.2454625964164734,
+          "min": 0.03780073672533035,
+          "pairs": 3
+        },
+        "Scarlett Johansson": {
+          "avg": 0.7842420935630798,
+          "min": 0.6805462837219238,
+          "pairs": 3
+        }
+      }
+    },
+    "inter_person": {
+      "mean": -0.007458399515599012,
+      "min": -0.05710233002901077,
+      "max": 0.04768538847565651,
+      "std": 0.027745718136429787,
+      "details": {
+        "Morgan Freeman vs Keanu Reeves": {
+          "avg": -0.00676129013299942,
+          "max": 0.04768538847565651
+        },
+        "Morgan Freeman vs Scarlett Johansson": {
+          "avg": 0.0005253784474916756,
+          "max": 0.045564915984869
+        },
+        "Keanu Reeves vs Scarlett Johansson": {
+          "avg": -0.016139285638928413,
+          "max": 0.035369623452425
+        }
+      }
+    },
+    "separation_gap": -0.009884651750326157
+  },
+  "threshold_tuning": {
+    "optimal_threshold": 0.1,
+    "best_accuracy": 0.9444444444444444,
+    "config_threshold": 0.4,
+    "auc": 0.0
+  },
+  "classifier": {
+    "svm": {
+      "cv_mean": 0.8888888888888888,
+      "cv_std": 0.3142696805273545,
+      "n_samples": 9,
+      "n_classes": 3
+    },
+    "knn": {
+      "cv_mean": 1.0,
+      "cv_std": 0.0,
+      "n_samples": 9,
+      "n_classes": 3
+    }
+  },
+  "embeddings_file": {
+    "path": "/Users/heung-ebit/Desktop/EdgeSystem/MissingPersonDetection/missing_persons_db/embeddings.pkl",
+    "size_kb": 18.57421875
+  }
+}
