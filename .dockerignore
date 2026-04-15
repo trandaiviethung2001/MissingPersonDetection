@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+output/
+videos/
+models/
+*.md
+LICENSE
+.dockerignore
+train_face_recognition.ipynb

@@ -1,0 +1,29 @@
+services:
+  detect:
+    build: .
+    image: missing-person-detection
+    volumes:
+      - ./missing_persons_db:/app/missing_persons_db
+      - ./output:/app/output
+      - ./videos:/app/videos
+    command: ["--video", "/app/videos/input.mp4", "--output", "/app/output/result.mp4", "--no-display"]
+
+  detect-stream:
+    build: .
+    image: missing-person-detection
+    volumes:
+      - ./missing_persons_db:/app/missing_persons_db
+      - ./output:/app/output
+    command: ["--video", "${STREAM_URL:-rtsp://localhost:554/stream}", "--output", "/app/output/stream_result.mp4", "--no-display"]
+
+  train:
+    build: .
+    image: missing-person-detection
+    volumes:
+      - ./missing_persons_db:/app/missing_persons_db
+      - ./models:/app/models
+      - ./output:/app/output
+      - ./train_face_recognition.ipynb:/app/train_face_recognition.ipynb
+    entrypoint: ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+    ports:
+      - "8888:8888"

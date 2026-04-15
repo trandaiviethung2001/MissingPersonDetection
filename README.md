@@ -36,9 +36,50 @@ Input Video (crowd footage)
 
 ## Installation
 
+### Option A: pip
+
 ```bash
 cd MissingPersonDetection
 pip install -r requirements.txt
+```
+
+### Option B: Docker
+
+```bash
+# Build
+docker build -t missing-person-detection .
+
+# Run on a video file
+docker run --rm \
+  -v $(pwd)/missing_persons_db:/app/missing_persons_db \
+  -v $(pwd)/output:/app/output \
+  -v /path/to/videos:/app/videos \
+  missing-person-detection \
+  --video /app/videos/input.mp4 --output /app/output/result.mp4 --no-display
+
+# Run on RTSP stream
+docker run --rm \
+  -v $(pwd)/missing_persons_db:/app/missing_persons_db \
+  -v $(pwd)/output:/app/output \
+  missing-person-detection \
+  --video rtsp://192.168.1.100:554/stream --output /app/output/stream.mp4 --no-display
+
+# Run training notebook
+docker compose up train
+# Open http://localhost:8888 in your browser
+```
+
+Or use **docker compose**:
+
+```bash
+# Detect from video (place your video as videos/input.mp4)
+docker compose up detect
+
+# Detect from RTSP stream
+STREAM_URL=rtsp://192.168.1.100:554/stream docker compose up detect-stream
+
+# Training notebook
+docker compose up train
 ```
 
 Key dependencies:
