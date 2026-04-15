@@ -2,9 +2,12 @@
 
 ## Demo
 
-![Detection Demo](output/demo_detection.gif)
+| Morgan Freeman | Scarlett Johansson |
+|:-:|:-:|
+| ![Morgan Freeman Demo](output/demo_detection.gif) | ![Scarlett Johansson Demo](output/demo_scarlett.gif) |
+| Detected at movie premiere (62% peak) | Detected at Avengers premiere (35% peak) |
 
-> Morgan Freeman detected in crowd footage at a movie premiere — the system identifies him with a red bounding box, green face box, and "MISSING" alert label with confidence score.
+> The system identifies missing persons in crowd footage with a red bounding box, green face box, and "MISSING" alert label with confidence score.
 
 ## Architecture
 
