@@ -1,5 +1,11 @@
 # Missing Person Detection System
 
+## Demo
+
+![Detection Demo](output/demo_detection.gif)
+
+> Morgan Freeman detected in crowd footage at a movie premiere — the system identifies him with a red bounding box, green face box, and "MISSING" alert label with confidence score.
+
 ## Architecture
 
 ```
@@ -77,16 +83,28 @@ The notebook will:
 5. Save `embeddings.pkl`
 6. (Optional) Train SVM/KNN classifier
 
-### Step 3: Run detection on video
+### Step 3: Run detection
 
 ```bash
-# Basic - display results on screen
+# === Video file ===
 python detect_missing_person.py --video path/to/crowd_video.mp4
 
 # Save output video
 python detect_missing_person.py --video path/to/video.mp4 --output output/result.mp4
 
-# Custom parameters
+# === Real-time webcam ===
+python detect_missing_person.py --webcam
+
+# Use a specific camera (e.g. external USB camera)
+python detect_missing_person.py --webcam --camera-id 1
+
+# Webcam with output recording
+python detect_missing_person.py --webcam --output output/live_capture.mp4
+
+# === RTSP / IP camera stream ===
+python detect_missing_person.py --video rtsp://192.168.1.100:554/stream
+
+# === Custom parameters ===
 python detect_missing_person.py \
     --video path/to/video.mp4 \
     --output output/result.mp4 \
@@ -95,16 +113,22 @@ python detect_missing_person.py \
     --no-display
 ```
 
+Press `q` to stop processing at any time.
+
 ### Command-line arguments
 
 | Argument      | Description                                    | Default  |
 |---------------|------------------------------------------------|----------|
-| `--video`     | Input video path (required)                    | -        |
+| `--video`     | Input video path or stream URL                 | -        |
+| `--webcam`    | Use webcam for real-time detection             | False    |
+| `--camera-id` | Camera device index (used with `--webcam`)     | 0        |
 | `--output`    | Output video path                              | None     |
 | `--db`        | Path to embeddings.pkl                         | config   |
 | `--threshold` | Cosine similarity threshold (higher = stricter)| 0.4      |
 | `--skip`      | Process every N frames                         | 5        |
 | `--no-display`| Disable video display window                   | False    |
+
+> **Note:** `--video` and `--webcam` are mutually exclusive — use one or the other.
 
 ## Project Structure
 

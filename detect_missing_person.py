@@ -2,7 +2,7 @@
 Missing Person Detection System - Main Pipeline.
 
 Pipeline:
-1. Read input video (crowd footage)
+1. Read input video (crowd footage) or live webcam/stream
 2. YOLO detects all persons in each frame
 3. InsightFace detects faces in each person region
 4. ArcFace embedding matched against missing person database
@@ -11,6 +11,8 @@ Pipeline:
 Usage:
     python detect_missing_person.py --video path/to/video.mp4
     python detect_missing_person.py --video path/to/video.mp4 --output output/result.mp4
+    python detect_missing_person.py --webcam
+    python detect_missing_person.py --webcam --camera-id 1
 """
 import argparse
 import time
@@ -117,18 +119,36 @@ def print_summary(detections_log):
     print("\n" + "=" * 60)
 
 
+def parse_video_source(source):
+    """Parse video source - file path, device index, or stream URL."""
+    if source is None:
+        return None
+    try:
+        return int(source)
+    except (ValueError, TypeError):
+        return source
+
+
 def main(video_path, output_path=None, db_path=None, threshold=None,
          frame_skip=None, no_display=False):
-    """Main pipeline for missing person detection in video."""
+    """Main pipeline for missing person detection in video or webcam."""
     embeddings_path = db_path or config.EMBEDDINGS_FILE
     thresh = threshold or config.RECOGNITION_THRESHOLD
     skip = frame_skip or config.FRAME_SKIP
     display = (not no_display) and config.DISPLAY_OUTPUT
 
+    is_live = isinstance(video_path, int) or (
+        isinstance(video_path, str) and video_path.startswith(("rtsp://", "http://", "https://"))
+    )
+
     print("=" * 60)
     print("  MISSING PERSON DETECTION SYSTEM")
     print("=" * 60)
-    print(f"\n  Video:     {video_path}")
+    if is_live:
+        source_label = f"Webcam (device {video_path})" if isinstance(video_path, int) else video_path
+        print(f"\n  Source:    {source_label} [LIVE]")
+    else:
+        print(f"\n  Video:     {video_path}")
     print(f"  Database:  {embeddings_path}")
     print(f"  Threshold: {thresh}")
     print(f"  Skip:      every {skip} frames")
@@ -159,23 +179,29 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
         threshold=thresh
     )
 
-    # === 2. Open video ===
-    print("[4/4] Opening video...")
+    # === 2. Open video / webcam ===
+    print("[4/4] Opening video source...")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"ERROR: Cannot open video: {video_path}")
+        print(f"ERROR: Cannot open video source: {video_path}")
         return
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     print(f"\n  Resolution: {width}x{height}")
     print(f"  FPS: {video_fps}")
-    print(f"  Total frames: {total_frames}")
-    print(f"  Duration: {total_frames / video_fps:.1f}s")
-    print(f"  Frames to process: ~{total_frames // skip}")
+
+    if is_live:
+        print(f"  Mode: REAL-TIME")
+        total_frames = 0
+    else:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f"  Total frames: {total_frames}")
+        print(f"  Duration: {total_frames / video_fps:.1f}s")
+        print(f"  Frames to process: ~{total_frames // skip}")
+
     print("\nProcessing... (press 'q' to stop)\n")
 
     writer = None
@@ -192,6 +218,8 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
+            if is_live:
+                continue
             break
 
         frame_count += 1
@@ -227,16 +255,17 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
             if name is not None:
                 match_count += 1
                 draw_alert(frame, face_info, name, similarity)
+                timestamp = frame_count / video_fps
                 detections_log.append({
                     "frame": frame_count,
-                    "timestamp": frame_count / video_fps,
+                    "timestamp": timestamp,
                     "person": name,
                     "person_id": person_id,
                     "similarity": similarity,
                     "bbox": face_info["person_bbox"]
                 })
                 print(f"  !!! DETECTED: {name} at frame {frame_count} "
-                      f"({frame_count / video_fps:.1f}s) - similarity={similarity:.3f}")
+                      f"({timestamp:.1f}s) - similarity={similarity:.3f}")
             else:
                 draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
 
@@ -257,7 +286,7 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
             writer.write(frame)
 
         # Progress
-        if processed_count % 20 == 0:
+        if not is_live and processed_count % 20 == 0:
             progress = frame_count / total_frames * 100 if total_frames > 0 else 0
             print(f"  Progress: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
                   f"FPS: {current_fps:.1f} | Persons: {len(persons)} | "
@@ -281,11 +310,20 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Missing person detection in crowd video"
+        description="Missing person detection in crowd video or live webcam"
+    )
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--video",
+        help="Path to input video file or stream URL (rtsp://, http://)"
+    )
+    source_group.add_argument(
+        "--webcam", action="store_true",
+        help="Use webcam for real-time detection"
     )
     parser.add_argument(
-        "--video", required=True,
-        help="Path to input video"
+        "--camera-id", type=int, default=0,
+        help="Camera device index (default: 0, used with --webcam)"
     )
     parser.add_argument(
         "--output", default=None,
@@ -310,8 +348,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.webcam:
+        video_source = args.camera_id
+    else:
+        video_source = parse_video_source(args.video)
+
     main(
-        video_path=args.video,
+        video_path=video_source,
         output_path=args.output,
         db_path=args.db,
         threshold=args.threshold,
