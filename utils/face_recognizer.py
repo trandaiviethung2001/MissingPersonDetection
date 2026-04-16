@@ -75,6 +75,26 @@ class FaceRecognizer:
 
         return None, float(max_similarity), None
 
+    def match_raw(self, embedding):
+        """
+        Match without threshold — always returns the best-matching person.
+
+        Used by the tracker's state machine which applies its own thresholds.
+
+        Returns:
+            Tuple (name, similarity, person_id) — never (None, ..., None).
+            Returns (None, 0.0, None) only when the database is empty.
+        """
+        if len(self.known_embeddings) == 0:
+            return None, 0.0, None
+
+        norm_emb = embedding / np.linalg.norm(embedding)
+        similarities = np.dot(self.known_embeddings, norm_emb)
+        max_idx = np.argmax(similarities)
+        return (self.known_names[max_idx],
+                float(similarities[max_idx]),
+                self.known_ids[max_idx])
+
     @staticmethod
     def build_database(db_dir, output_path, app=None):
         """

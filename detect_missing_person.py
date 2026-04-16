@@ -21,7 +21,7 @@ import numpy as np
 from insightface.app import FaceAnalysis
 
 import config
-from utils import PersonDetector, FaceDetector, FaceRecognizer
+from utils import PersonDetector, FaceDetector, FaceRecognizer, PersonTracker, TrackState
 
 
 def setup_video_writer(cap, output_path):
@@ -53,7 +53,7 @@ def draw_face_box(frame, face_bbox, color):
 
 
 def draw_alert(frame, face_info, name, similarity):
-    """Draw alert when a missing person is detected."""
+    """Draw alert when a missing person is detected (legacy, non-tracking mode)."""
     confidence = similarity * 100
     label = f"MISSING: {name} ({confidence:.0f}%)"
 
@@ -65,7 +65,60 @@ def draw_alert(frame, face_info, name, similarity):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
 
-def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces, matches):
+def draw_tracked_person(frame, track_info):
+    """Draw bounding box based on tracking state."""
+    bbox = track_info["bbox"]
+    state = track_info["state"]
+    name = track_info.get("person_name")
+    tid = track_info.get("track_id", "")
+    best_sim = track_info.get("best_similarity", 0)
+
+    if state == TrackState.LOCKED:
+        confidence = best_sim * 100
+        label = f"LOCKED: {name} ({confidence:.0f}%) [T{tid}]"
+        draw_person_box(frame, bbox, config.LOCKED_COLOR, label)
+
+        # Alert flash
+        x1, y1, x2, y2 = bbox
+        cv2.putText(frame, "! ALERT !", (x1, y2 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        face_info = track_info.get("face_info")
+        if face_info:
+            draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+
+    elif state == TrackState.WATCHING:
+        sim = track_info.get("similarity", 0)
+        label = f"WATCHING: {name or '?'} [{sim:.0%}] [T{tid}]"
+        draw_person_box(frame, bbox, config.WATCHING_COLOR, label)
+
+    else:
+        draw_person_box(frame, bbox, config.PERSON_COLOR)
+
+
+def draw_predicted_track(frame, pred):
+    """Draw predicted bbox for a TRACKING person on skipped frames."""
+    bbox = pred["bbox"]
+    name = pred.get("person_name", "?")
+    tid = pred.get("track_id", "")
+    best_sim = pred.get("best_similarity", 0)
+    confidence = best_sim * 100
+    label = f"LOCKED: {name} ({confidence:.0f}%) [T{tid}]"
+
+    x1, y1, x2, y2 = bbox
+    # Dashed-style: draw thinner box
+    cv2.rectangle(frame, (x1, y1), (x2, y2), config.LOCKED_COLOR, 1)
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                   config.FONT_SCALE, config.FONT_THICKNESS)
+    cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw, y1),
+                  config.LOCKED_COLOR, -1)
+    cv2.putText(frame, label, (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, config.FONT_SCALE,
+                (255, 255, 255), config.FONT_THICKNESS)
+
+
+def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces,
+                      matches, active_tracks=None):
     """Draw info overlay on frame corner."""
     info_lines = [
         f"Frame: {frame_count}",
@@ -74,11 +127,26 @@ def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces, match
         f"Faces: {total_faces}",
         f"Matches: {matches}",
     ]
+    if active_tracks is not None:
+        info_lines.append(f"Tracking: {active_tracks}")
     y = 30
     for line in info_lines:
         cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (0, 255, 255), 1)
         y += 25
+
+
+def _bbox_overlap(box_a, box_b):
+    """IoU between two (x1, y1, x2, y2) bounding boxes."""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
 
 
 def print_summary(detections_log):
@@ -179,6 +247,25 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
         threshold=thresh
     )
 
+    person_tracker = None
+    if config.TRACKING_ENABLED:
+        print("[3.5/4] Initializing Person Tracker (ByteTrack)...")
+        person_tracker = PersonTracker(
+            lost_track_buffer=config.BYTETRACK_LOST_BUFFER,
+            minimum_matching_threshold=config.BYTETRACK_MATCH_THRESHOLD,
+            frame_rate=30,
+            watch_threshold=config.TRACKING_WATCH_THRESHOLD,
+            watch_frames=config.TRACKING_WATCH_FRAMES,
+            trigger_score=config.TRACKING_TRIGGER_SCORE,
+            trigger_high=config.TRACKING_TRIGGER_HIGH,
+            max_watching_frames=config.TRACKING_MAX_WATCHING_FRAMES,
+            reverify_interval=config.LOCKED_REVERIFY_INTERVAL,
+            reverify_ok=config.LOCKED_REVERIFY_OK,
+            reverify_drop=config.LOCKED_REVERIFY_DROP,
+            reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
+            bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
+        )
+
     # === 2. Open video / webcam ===
     print("[4/4] Opening video source...")
     cap = cv2.VideoCapture(video_path)
@@ -224,10 +311,18 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
 
         frame_count += 1
 
-        # Skip frames
+        # Skip frames – but still draw active tracking predictions
         if frame_count % skip != 0:
+            if person_tracker:
+                for pred in person_tracker.get_predicted_boxes():
+                    draw_predicted_track(frame, pred)
             if writer:
                 writer.write(frame)
+            if display:
+                cv2.imshow("Missing Person Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    print("\nStopped by user.")
+                    break
             continue
 
         processed_count += 1
@@ -235,45 +330,86 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
         # Step 4: Detect persons with YOLO
         persons = person_detector.detect(frame)
 
-        for person in persons:
-            draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
-
         # Step 5: Detect faces in each person region
         crops = person_detector.crop_persons(frame, persons)
         face_results = face_detector.detect_faces_in_crops(crops)
 
-        # Step 6: Match faces against database
+        # Step 6: Tracking mode – ByteTrack + state machine
         match_count = 0
-        for face_info in face_results:
-            embedding = face_info.get("embedding")
-            if embedding is None:
-                draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
-                continue
+        if person_tracker:
+            tracking = person_tracker.update(
+                frame, persons, face_results, face_recognizer
+            )
 
-            name, similarity, person_id = face_recognizer.match(embedding)
+            # Draw tracked persons by state
+            for track in tracking["tracked"]:
+                draw_tracked_person(frame, track)
+                if track["state"] == TrackState.LOCKED:
+                    match_count += 1
 
-            if name is not None:
-                match_count += 1
-                draw_alert(frame, face_info, name, similarity)
+            # Draw untracked faces (those not associated with any track)
+            tracked_person_bboxes = {tuple(t["bbox"]) for t in tracking["tracked"]}
+            for face_info in face_results:
+                pbbox = tuple(face_info["person_bbox"])
+                already_drawn = any(
+                    _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
+                )
+                if not already_drawn:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+
+            # Log new alerts
+            for alert in tracking["alerts"]:
                 timestamp = frame_count / video_fps
                 detections_log.append({
                     "frame": frame_count,
                     "timestamp": timestamp,
-                    "person": name,
-                    "person_id": person_id,
-                    "similarity": similarity,
-                    "bbox": face_info["person_bbox"]
+                    "person": alert["person_name"],
+                    "person_id": alert["person_id"],
+                    "similarity": alert["similarity"],
+                    "bbox": alert["bbox"]
                 })
-                print(f"  !!! DETECTED: {name} at frame {frame_count} "
-                      f"({timestamp:.1f}s) - similarity={similarity:.3f}")
-            else:
-                draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                print(f"  !!! LOCKED: {alert['person_name']} "
+                      f"at frame {frame_count} ({timestamp:.1f}s) "
+                      f"- best_similarity={alert['similarity']:.3f} "
+                      f"[Track T{alert['track_id']}]")
+
+        # Step 6 (legacy): Direct matching without tracking
+        else:
+            for person in persons:
+                draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
+
+            for face_info in face_results:
+                embedding = face_info.get("embedding")
+                if embedding is None:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                    continue
+
+                name, similarity, person_id = face_recognizer.match(embedding)
+
+                if name is not None:
+                    match_count += 1
+                    draw_alert(frame, face_info, name, similarity)
+                    timestamp = frame_count / video_fps
+                    detections_log.append({
+                        "frame": frame_count,
+                        "timestamp": timestamp,
+                        "person": name,
+                        "person_id": person_id,
+                        "similarity": similarity,
+                        "bbox": face_info["person_bbox"]
+                    })
+                    print(f"  !!! DETECTED: {name} at frame {frame_count} "
+                          f"({timestamp:.1f}s) - similarity={similarity:.3f}")
+                else:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
 
         # Step 7: Draw info overlay
         elapsed = time.time() - start_time
         current_fps = processed_count / elapsed if elapsed > 0 else 0
+        active_tracks = len(person_tracker._active_tracks()) if person_tracker else 0
         draw_info_overlay(frame, frame_count, current_fps,
-                          len(persons), len(face_results), match_count)
+                          len(persons), len(face_results), match_count,
+                          active_tracks if person_tracker else None)
 
         # Step 8: Display / write video
         if display:
@@ -290,7 +426,7 @@ def main(video_path, output_path=None, db_path=None, threshold=None,
             progress = frame_count / total_frames * 100 if total_frames > 0 else 0
             print(f"  Progress: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
                   f"FPS: {current_fps:.1f} | Persons: {len(persons)} | "
-                  f"Faces: {len(face_results)}")
+                  f"Faces: {len(face_results)} | Active tracks: {active_tracks}")
 
     # === 9. Cleanup and report ===
     cap.release()

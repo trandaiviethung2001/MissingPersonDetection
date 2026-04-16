@@ -7,3 +7,4 @@ Pillow>=10.0.0
 jupyter>=1.0.0
 matplotlib>=3.7.0
 tqdm>=4.65.0
+supervision>=0.18.0
