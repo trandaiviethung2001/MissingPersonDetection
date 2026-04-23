@@ -197,10 +197,10 @@ def parse_video_source(source):
         return source
 
 
-def main(video_path, output_path=None, db_path=None, threshold=None,
+def main(video_path, output_path=None, threshold=None,
          frame_skip=None, no_display=False):
     """Main pipeline for missing person detection in video or webcam."""
-    embeddings_path = db_path or config.EMBEDDINGS_FILE
+    embeddings_path = config.EMBEDDINGS_FILE
     thresh = threshold or config.RECOGNITION_THRESHOLD
     skip = frame_skip or config.FRAME_SKIP
     display = (not no_display) and config.DISPLAY_OUTPUT
@@ -466,10 +466,6 @@ if __name__ == "__main__":
         help="Path to save output video (optional)"
     )
     parser.add_argument(
-        "--db", default=None,
-        help="Path to embeddings.pkl (overrides config)"
-    )
-    parser.add_argument(
         "--threshold", type=float, default=None,
         help="Cosine similarity threshold (overrides config)"
     )
@@ -492,7 +488,6 @@ if __name__ == "__main__":
     main(
         video_path=video_source,
         output_path=args.output,
-        db_path=args.db,
         threshold=args.threshold,
         frame_skip=args.skip,
         no_display=args.no_display
