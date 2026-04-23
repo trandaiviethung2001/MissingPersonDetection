@@ -7,21 +7,157 @@ Pipeline:
 3. InsightFace detects faces in each person region
 4. ArcFace embedding matched against missing person database
 5. Alert when a missing person is detected
-
-Usage:
-    python detect_missing_person.py --video path/to/video.mp4
-    python detect_missing_person.py --video path/to/video.mp4 --output output/result.mp4
-    python detect_missing_person.py --webcam
-    python detect_missing_person.py --webcam --camera-id 1
 """
-import argparse
 import time
+from pathlib import Path
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 
 import config
 from utils import PersonDetector, FaceDetector, FaceRecognizer, PersonTracker, TrackState
+
+
+def resolve_latest_embeddings_path(preferred_path=None, db_dir=None):
+    """Return the newest embeddings.pkl, preferring an explicit path when valid."""
+    if preferred_path:
+        preferred = Path(preferred_path)
+        if preferred.exists():
+            return str(preferred)
+
+    search_root = Path(db_dir or config.MISSING_PERSONS_DB_DIR)
+    candidates = list(search_root.rglob("embeddings.pkl"))
+    if not candidates:
+        return str(search_root / "embeddings.pkl")
+
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return str(newest)
+
+
+class MissingPersonPipeline:
+    """Reusable inference pipeline shared by CLI and FastAPI backend."""
+
+    def __init__(self, threshold=None, frame_skip=None, db_path=None):
+        self.embeddings_path = resolve_latest_embeddings_path(db_path, config.MISSING_PERSONS_DB_DIR)
+        self.threshold = threshold or config.RECOGNITION_THRESHOLD
+        self.frame_skip = frame_skip or config.FRAME_SKIP
+
+        self.person_detector = PersonDetector(
+            model_path=config.YOLO_MODEL_PATH,
+            confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD,
+        )
+
+        face_app = FaceAnalysis(
+            name=config.INSIGHTFACE_MODEL,
+            providers=["CPUExecutionProvider"],
+        )
+        face_app.prepare(ctx_id=0, det_size=(640, 640))
+
+        self.face_detector = FaceDetector(
+            app=face_app,
+            det_thresh=config.FACE_DETECTION_THRESHOLD,
+        )
+        self.face_recognizer = FaceRecognizer(
+            embeddings_path=self.embeddings_path,
+            threshold=self.threshold,
+        )
+        self.person_tracker = None
+        if config.TRACKING_ENABLED:
+            self.person_tracker = PersonTracker(
+                lost_track_buffer=config.BYTETRACK_LOST_BUFFER,
+                minimum_matching_threshold=config.BYTETRACK_MATCH_THRESHOLD,
+                frame_rate=30,
+                watch_threshold=config.TRACKING_WATCH_THRESHOLD,
+                watch_frames=config.TRACKING_WATCH_FRAMES,
+                trigger_score=config.TRACKING_TRIGGER_SCORE,
+                trigger_high=config.TRACKING_TRIGGER_HIGH,
+                max_watching_frames=config.TRACKING_MAX_WATCHING_FRAMES,
+                reverify_interval=config.LOCKED_REVERIFY_INTERVAL,
+                reverify_ok=config.LOCKED_REVERIFY_OK,
+                reverify_drop=config.LOCKED_REVERIFY_DROP,
+                reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
+                bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
+            )
+
+        self.frame_count = 0
+        self.processed_count = 0
+        self.started_at = time.time()
+
+    def process_frame(self, frame):
+        """Run one frame through the shared detection pipeline."""
+        self.frame_count += 1
+
+        if self.frame_count % self.frame_skip != 0:
+            predictions = []
+            if self.person_tracker:
+                predictions = self.person_tracker.get_predicted_boxes()
+                for pred in predictions:
+                    draw_predicted_track(frame, pred)
+            return {
+                "frame": frame,
+                "processed": False,
+                "persons": [],
+                "faces": [],
+                "tracking": {
+                    "tracked": [],
+                    "alerts": [],
+                    "active": self.person_tracker._active_tracks() if self.person_tracker else [],
+                },
+                "match_count": 0,
+                "predictions": predictions,
+            }
+
+        self.processed_count += 1
+        persons = self.person_detector.detect(frame)
+        crops = self.person_detector.crop_persons(frame, persons)
+        face_results = self.face_detector.detect_faces_in_crops(crops)
+        match_count = 0
+        tracking = {"tracked": [], "alerts": [], "active": []}
+
+        if self.person_tracker:
+            tracking = self.person_tracker.update(frame, persons, face_results, self.face_recognizer)
+
+            for track in tracking["tracked"]:
+                draw_tracked_person(frame, track)
+                if track["state"] == TrackState.LOCKED:
+                    match_count += 1
+
+            tracked_person_bboxes = {tuple(t["bbox"]) for t in tracking["tracked"]}
+            for face_info in face_results:
+                pbbox = tuple(face_info["person_bbox"])
+                already_drawn = any(
+                    _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
+                )
+                if not already_drawn:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+        else:
+            for person in persons:
+                draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
+
+            for face_info in face_results:
+                embedding = face_info.get("embedding")
+                if embedding is None:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                    continue
+
+                name, similarity, person_id = self.face_recognizer.match(embedding)
+                if name is not None:
+                    match_count += 1
+                    draw_alert(frame, face_info, name, similarity)
+
+        return {
+            "frame": frame,
+            "processed": True,
+            "persons": persons,
+            "faces": face_results,
+            "tracking": tracking,
+            "match_count": match_count,
+            "predictions": [],
+        }
+
+    def current_fps(self):
+        elapsed = time.time() - self.started_at
+        return self.processed_count / elapsed if elapsed > 0 else 0.0
 
 
 def setup_video_writer(cap, output_path):
@@ -200,7 +336,7 @@ def parse_video_source(source):
 def main(video_path, output_path=None, threshold=None,
          frame_skip=None, no_display=False):
     """Main pipeline for missing person detection in video or webcam."""
-    embeddings_path = config.EMBEDDINGS_FILE
+    embeddings_path = resolve_latest_embeddings_path(config.EMBEDDINGS_FILE, config.MISSING_PERSONS_DB_DIR)
     thresh = threshold or config.RECOGNITION_THRESHOLD
     skip = frame_skip or config.FRAME_SKIP
     display = (not no_display) and config.DISPLAY_OUTPUT
@@ -222,49 +358,12 @@ def main(video_path, output_path=None, threshold=None,
     print(f"  Skip:      every {skip} frames")
     print()
 
-    # === 1. Initialize modules ===
-    print("[1/4] Initializing Person Detector (YOLO)...")
-    person_detector = PersonDetector(
-        model_path=config.YOLO_MODEL_PATH,
-        confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD
+    print("[1/4] Initializing shared detection pipeline...")
+    pipeline = MissingPersonPipeline(
+        threshold=thresh,
+        frame_skip=skip,
+        db_path=embeddings_path,
     )
-
-    print("[2/4] Initializing InsightFace (ArcFace)...")
-    face_app = FaceAnalysis(
-        name=config.INSIGHTFACE_MODEL,
-        providers=["CPUExecutionProvider"]
-    )
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
-
-    face_detector = FaceDetector(
-        app=face_app,
-        det_thresh=config.FACE_DETECTION_THRESHOLD
-    )
-
-    print("[3/4] Initializing Face Recognizer...")
-    face_recognizer = FaceRecognizer(
-        embeddings_path=embeddings_path,
-        threshold=thresh
-    )
-
-    person_tracker = None
-    if config.TRACKING_ENABLED:
-        print("[3.5/4] Initializing Person Tracker (ByteTrack)...")
-        person_tracker = PersonTracker(
-            lost_track_buffer=config.BYTETRACK_LOST_BUFFER,
-            minimum_matching_threshold=config.BYTETRACK_MATCH_THRESHOLD,
-            frame_rate=30,
-            watch_threshold=config.TRACKING_WATCH_THRESHOLD,
-            watch_frames=config.TRACKING_WATCH_FRAMES,
-            trigger_score=config.TRACKING_TRIGGER_SCORE,
-            trigger_high=config.TRACKING_TRIGGER_HIGH,
-            max_watching_frames=config.TRACKING_MAX_WATCHING_FRAMES,
-            reverify_interval=config.LOCKED_REVERIFY_INTERVAL,
-            reverify_ok=config.LOCKED_REVERIFY_OK,
-            reverify_drop=config.LOCKED_REVERIFY_DROP,
-            reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
-            bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
-        )
 
     # === 2. Open video / webcam ===
     print("[4/4] Opening video source...")
@@ -445,50 +544,12 @@ def main(video_path, output_path=None, threshold=None,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Missing person detection in crowd video or live webcam"
-    )
-    source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(
-        "--video",
-        help="Path to input video file or stream URL (rtsp://, http://)"
-    )
-    source_group.add_argument(
-        "--webcam", action="store_true",
-        help="Use webcam for real-time detection"
-    )
-    parser.add_argument(
-        "--camera-id", type=int, default=0,
-        help="Camera device index (default: 0, used with --webcam)"
-    )
-    parser.add_argument(
-        "--output", default=None,
-        help="Path to save output video (optional)"
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=None,
-        help="Cosine similarity threshold (overrides config)"
-    )
-    parser.add_argument(
-        "--skip", type=int, default=None,
-        help="Process every N frames (overrides config)"
-    )
-    parser.add_argument(
-        "--no-display", action="store_true",
-        help="Disable video display window"
-    )
-
-    args = parser.parse_args()
-
-    if args.webcam:
-        video_source = args.camera_id
-    else:
-        video_source = parse_video_source(args.video)
+    video_source = 0
 
     main(
         video_path=video_source,
-        output_path=args.output,
-        threshold=args.threshold,
-        frame_skip=args.skip,
-        no_display=args.no_display
+        output_path=None,
+        threshold=None,
+        frame_skip=None,
+        no_display=False,
     )

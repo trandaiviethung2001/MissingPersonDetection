@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quick Training</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="training-body">
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <div class="logo">
+                <span class="logo-text">QUICK TRAINING</span>
+            </div>
+        </div>
+        <div class="top-bar-right">
+            <a class="btn btn-info" href="/">Back To Dashboard</a>
+        </div>
+    </header>
+
+    <main class="training-layout">
+        <section class="card training-card">
+            <h2 class="card-title">Add Missing Person</h2>
+            <p class="card-note">Upload 3 or more clear face photos. The backend will store them in `missing_persons_db/person_xxx/`.</p>
+
+            <form id="training-form" class="training-form">
+                <label class="training-label" for="person-name">Missing Person Name</label>
+                <input id="person-name" name="person-name" class="training-input" type="text" placeholder="Enter full name" required>
+
+                <label class="training-label" for="person-images">Photos</label>
+                <input id="person-images" name="person-images" class="training-input" type="file" accept="image/*" multiple required>
+
+                <div class="training-actions">
+                    <button class="btn btn-primary" type="submit">Add Person</button>
+                    <button class="btn btn-warning" type="button" id="train-button">Build Embeddings</button>
+                </div>
+            </form>
+
+            <div class="training-result" id="training-result">Ready.</div>
+        </section>
+
+        <section class="card training-card">
+            <h2 class="card-title">Current Database</h2>
+            <div class="people-list" id="people-list">
+                <p class="card-note">Loading people...</p>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/training.js"></script>
+</body>
+</html>
