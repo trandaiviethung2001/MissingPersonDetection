@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Video</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="training-body">
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <div class="logo">
+                <span class="logo-text">UPLOAD VIDEO</span>
+            </div>
+        </div>
+        <div class="top-bar-right">
+            <a class="btn btn-info" href="/">Dashboard</a>
+            <a class="btn btn-info" href="/training">Quick Training</a>
+        </div>
+    </header>
+
+    <main class="training-layout">
+        <section class="card training-card">
+            <h2 class="card-title">Upload a video to scan</h2>
+            <p class="card-note">
+                The backend runs the same detection + tracking pipeline used by
+                the live dashboard. Processing is CPU-bound, so only one upload
+                runs at a time.
+            </p>
+
+            <form id="upload-form" class="training-form">
+                <label class="training-label" for="video-file">Video file</label>
+                <input
+                    id="video-file"
+                    name="video"
+                    class="training-input"
+                    type="file"
+                    accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo"
+                    required
+                >
+
+                <div class="upload-grid">
+                    <div>
+                        <label class="training-label" for="threshold-input">
+                            Recognition threshold
+                        </label>
+                        <input
+                            id="threshold-input"
+                            name="threshold"
+                            class="training-input"
+                            type="number"
+                            min="0.2" max="0.8" step="0.05"
+                            placeholder="use backend default"
+                        >
+                    </div>
+                    <div>
+                        <label class="training-label" for="frame-skip-input">
+                            Frame skip
+                        </label>
+                        <input
+                            id="frame-skip-input"
+                            name="frame_skip"
+                            class="training-input"
+                            type="number"
+                            min="1" max="20" step="1"
+                            placeholder="use backend default"
+                        >
+                    </div>
+                </div>
+
+                <div class="training-actions">
+                    <button class="btn btn-primary" type="submit" id="upload-submit">
+                        Run detection
+                    </button>
+                </div>
+            </form>
+
+            <div class="upload-progress" id="upload-progress" hidden>
+                <div class="upload-progress-track">
+                    <div class="upload-progress-fill" id="upload-progress-fill"></div>
+                </div>
+                <div class="upload-progress-meta">
+                    <span id="upload-progress-label">Uploading…</span>
+                    <span id="upload-progress-pct">0%</span>
+                </div>
+            </div>
+
+            <div class="training-result" id="upload-status">Ready.</div>
+        </section>
+
+        <section class="card training-card">
+            <h2 class="card-title">Result</h2>
+            <video
+                id="result-video"
+                class="upload-video"
+                controls
+                playsinline
+                preload="metadata"
+                style="display: none;"
+            ></video>
+            <div class="upload-placeholder" id="result-placeholder">
+                <p>Annotated video will appear here after processing.</p>
+            </div>
+            <pre class="upload-summary" id="upload-summary"></pre>
+        </section>
+    </main>
+
+    <script src="/static/upload.js"></script>
+</body>
+</html>

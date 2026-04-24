@@ -7,15 +7,9 @@ Pipeline:
 3. InsightFace detects faces in each person region
 4. ArcFace embedding matched against missing person database
 5. Alert when a missing person is detected
-
-Usage:
-    python detect_missing_person.py --video path/to/video.mp4
-    python detect_missing_person.py --video path/to/video.mp4 --output output/result.mp4
-    python detect_missing_person.py --webcam
-    python detect_missing_person.py --webcam --camera-id 1
 """
-import argparse
 import time
+from pathlib import Path
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
@@ -24,19 +18,206 @@ import config
 from utils import PersonDetector, FaceDetector, FaceRecognizer, PersonTracker, TrackState
 
 
+def resolve_latest_embeddings_path(preferred_path=None, db_dir=None):
+    """Return the newest embeddings.pkl, preferring an explicit path when valid."""
+    if preferred_path:
+        preferred = Path(preferred_path)
+        if preferred.exists():
+            return str(preferred)
+
+    search_root = Path(db_dir or config.MISSING_PERSONS_DB_DIR)
+    candidates = list(search_root.rglob("embeddings.pkl"))
+    if not candidates:
+        return str(search_root / "embeddings.pkl")
+
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return str(newest)
+
+
+class MissingPersonPipeline:
+    """Reusable inference pipeline shared by CLI and FastAPI backend."""
+
+    def __init__(self, threshold=None, frame_skip=None, db_path=None):
+        self.embeddings_path = resolve_latest_embeddings_path(db_path, config.MISSING_PERSONS_DB_DIR)
+        self.threshold = threshold or config.RECOGNITION_THRESHOLD
+        self.frame_skip = frame_skip or config.FRAME_SKIP
+
+        self.person_detector = PersonDetector(
+            model_path=config.YOLO_MODEL_PATH,
+            confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD,
+            image_size=config.YOLO_IMAGE_SIZE,
+        )
+
+        face_app = FaceAnalysis(
+            name=config.INSIGHTFACE_MODEL,
+            providers=["CPUExecutionProvider"],
+        )
+        face_app.prepare(ctx_id=0, det_size=(config.INSIGHTFACE_DET_SIZE, config.INSIGHTFACE_DET_SIZE))
+
+        self.face_detector = FaceDetector(
+            app=face_app,
+            det_thresh=config.FACE_DETECTION_THRESHOLD,
+        )
+        self.face_recognizer = FaceRecognizer(
+            embeddings_path=self.embeddings_path,
+            threshold=self.threshold,
+        )
+        self.person_tracker = None
+        if config.TRACKING_ENABLED:
+            self.person_tracker = PersonTracker(
+                lost_track_buffer=config.BYTETRACK_LOST_BUFFER,
+                minimum_matching_threshold=config.BYTETRACK_MATCH_THRESHOLD,
+                frame_rate=30,
+                watch_threshold=config.TRACKING_WATCH_THRESHOLD,
+                watch_frames=config.TRACKING_WATCH_FRAMES,
+                trigger_score=config.TRACKING_TRIGGER_SCORE,
+                trigger_high=config.TRACKING_TRIGGER_HIGH,
+                max_watching_frames=config.TRACKING_MAX_WATCHING_FRAMES,
+                reverify_interval=config.LOCKED_REVERIFY_INTERVAL,
+                reverify_ok=config.LOCKED_REVERIFY_OK,
+                reverify_drop=config.LOCKED_REVERIFY_DROP,
+                reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
+                bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
+                predict_draw_timeout=config.LOCKED_PREDICT_DRAW_TIMEOUT,
+                out_of_frame_margin=config.LOCKED_OUT_OF_FRAME_MARGIN,
+            )
+
+        self.frame_count = 0
+        self.processed_count = 0
+        self.started_at = time.time()
+
+    def process_frame(self, frame):
+        """Run one frame through the shared detection pipeline."""
+        self.frame_count += 1
+
+        if self.frame_count % self.frame_skip != 0:
+            predictions = []
+            active_tracks = []
+            if self.person_tracker:
+                # Only draw LOCKED tracks on skipped frames — redrawing every
+                # active track was adding a putText per bbox per skipped frame
+                # which noticeably dragged down the capture FPS.
+                predictions = self.person_tracker.peek_predicted_at_time(
+                    time.monotonic(), locked_only=True
+                )
+                for pred in predictions:
+                    draw_predicted_track(frame, pred)
+                active_tracks = self.person_tracker._active_tracks()
+            if config.TACTICAL_MAP_ENABLED and active_tracks:
+                draw_tactical_map(frame, active_tracks)
+            return {
+                "frame": frame,
+                "processed": False,
+                "persons": [],
+                "faces": [],
+                "tracking": {
+                    "tracked": [],
+                    "alerts": [],
+                    "active": active_tracks,
+                },
+                "match_count": 0,
+                "predictions": predictions,
+            }
+
+        self.processed_count += 1
+        persons = self.person_detector.detect(frame)
+        crops = self.person_detector.crop_persons(frame, persons)
+        face_results = self.face_detector.detect_faces_in_crops(crops)
+        match_count = 0
+        tracking = {"tracked": [], "alerts": [], "active": []}
+
+        if self.person_tracker:
+            tracking = self.person_tracker.update(frame, persons, face_results, self.face_recognizer)
+
+            for track in tracking["tracked"]:
+                draw_tracked_person(frame, track)
+                if track["state"] == TrackState.LOCKED:
+                    match_count += 1
+
+            tracked_person_bboxes = {tuple(t["bbox"]) for t in tracking["tracked"]}
+            person_conf_by_bbox = {tuple(p["bbox"]): p["confidence"] for p in persons}
+            for person in persons:
+                pbbox = tuple(person["bbox"])
+                already_tracked = any(
+                    _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
+                )
+                if not already_tracked:
+                    draw_person_box(frame, person["bbox"], config.PERSON_COLOR,
+                                    score=person["confidence"])
+
+            for face_info in face_results:
+                pbbox = tuple(face_info["person_bbox"])
+                already_drawn = any(
+                    _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
+                )
+                if not already_drawn:
+                    draw_person_box(frame, face_info["person_bbox"], config.PERSON_COLOR,
+                                    score=person_conf_by_bbox.get(pbbox))
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
+        else:
+            for person in persons:
+                draw_person_box(frame, person["bbox"], config.PERSON_COLOR,
+                                score=person["confidence"])
+
+            for face_info in face_results:
+                embedding = face_info.get("embedding")
+                if embedding is None:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
+                    continue
+
+                name, similarity, person_id = self.face_recognizer.match(embedding)
+                if name is not None:
+                    match_count += 1
+                    draw_alert(frame, face_info, name, similarity)
+                else:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
+
+        if config.TACTICAL_MAP_ENABLED and tracking.get("active"):
+            draw_tactical_map(frame, tracking["active"])
+
+        return {
+            "frame": frame,
+            "processed": True,
+            "persons": persons,
+            "faces": face_results,
+            "tracking": tracking,
+            "match_count": match_count,
+            "predictions": [],
+        }
+
+    def current_fps(self):
+        elapsed = time.time() - self.started_at
+        return self.processed_count / elapsed if elapsed > 0 else 0.0
+
+
 def setup_video_writer(cap, output_path):
-    """Create VideoWriter matching source FPS and resolution."""
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    """Create VideoWriter matching source FPS and resolution.
+
+    Falls back to 30.0 fps when the source reports 0 (common for webcams and
+    some RTSP streams) — VideoWriter(fps=0) produces a broken mp4. Keeps the
+    value as a float so 29.97-style rates aren't silently rounded to 29,
+    which would drift audio/video out of sync on later re-encodes.
+    """
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
 
-def draw_person_box(frame, bbox, color, label=None):
-    """Draw bounding box for a person."""
+def draw_person_box(frame, bbox, color, label=None, score=None):
+    """Draw bounding box for a person.
+
+    If ``label`` is None but ``score`` is provided, auto-formats "NN%".
+    Explicit ``label`` wins (lets LOCKED/WATCHING keep their rich text).
+    """
     x1, y1, x2, y2 = bbox
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    if label is None and score is not None:
+        label = f"{float(score) * 100:.0f}%"
     if label:
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
                                        config.FONT_SCALE, config.FONT_THICKNESS)
@@ -46,10 +227,14 @@ def draw_person_box(frame, bbox, color, label=None):
                     (255, 255, 255), config.FONT_THICKNESS)
 
 
-def draw_face_box(frame, face_bbox, color):
-    """Draw bounding box for a face."""
+def draw_face_box(frame, face_bbox, color, score=None):
+    """Draw bounding box for a face. Writes "NN%" below the box when given."""
     x1, y1, x2, y2 = face_bbox
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    if score is not None:
+        label = f"{float(score) * 100:.0f}%"
+        cv2.putText(frame, label, (x1, y2 + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
 
 def draw_alert(frame, face_info, name, similarity):
@@ -58,7 +243,8 @@ def draw_alert(frame, face_info, name, similarity):
     label = f"MISSING: {name} ({confidence:.0f}%)"
 
     draw_person_box(frame, face_info["person_bbox"], config.ALERT_COLOR, label)
-    draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+    draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR,
+                  score=face_info.get("det_score"))
 
     x1, y1, x2, y2 = face_info["face_bbox"]
     cv2.putText(frame, "! ALERT !", (x1, y1 - 10),
@@ -72,6 +258,15 @@ def draw_tracked_person(frame, track_info):
     name = track_info.get("person_name")
     tid = track_info.get("track_id", "")
     best_sim = track_info.get("best_similarity", 0)
+    person_conf = track_info.get("person_conf")
+    face_info = track_info.get("face_info")
+    face_score = face_info.get("det_score") if face_info else None
+
+    def _face_bbox_for(track):
+        fi = track.get("face_info")
+        if fi and fi.get("face_bbox") is not None:
+            return fi["face_bbox"]
+        return track.get("face_bbox_predicted")
 
     if state == TrackState.LOCKED:
         confidence = best_sim * 100
@@ -83,21 +278,24 @@ def draw_tracked_person(frame, track_info):
         cv2.putText(frame, "! ALERT !", (x1, y2 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        face_info = track_info.get("face_info")
-        if face_info:
-            draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+        face_bbox = _face_bbox_for(track_info)
+        if face_bbox is not None:
+            draw_face_box(frame, face_bbox, config.FACE_COLOR, score=face_score)
 
     elif state == TrackState.WATCHING:
         sim = track_info.get("similarity", 0)
         label = f"WATCHING: {name or '?'} [{sim:.0%}] [T{tid}]"
         draw_person_box(frame, bbox, config.WATCHING_COLOR, label)
+        face_bbox = _face_bbox_for(track_info)
+        if face_bbox is not None:
+            draw_face_box(frame, face_bbox, config.FACE_COLOR, score=face_score)
 
     else:
-        draw_person_box(frame, bbox, config.PERSON_COLOR)
+        draw_person_box(frame, bbox, config.PERSON_COLOR, score=person_conf)
 
 
 def draw_predicted_track(frame, pred):
-    """Draw predicted bbox for a TRACKING person on skipped frames."""
+    """Draw predicted bbox for a LOCKED person on skipped frames."""
     bbox = pred["bbox"]
     name = pred.get("person_name", "?")
     tid = pred.get("track_id", "")
@@ -115,6 +313,111 @@ def draw_predicted_track(frame, pred):
     cv2.putText(frame, label, (x1, y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, config.FONT_SCALE,
                 (255, 255, 255), config.FONT_THICKNESS)
+
+    # Draw face overlay from the cached face offset so the green face box
+    # stays with the person even between face-detection frames.
+    face_bbox = pred.get("face_bbox_predicted")
+    if face_bbox is not None:
+        draw_face_box(frame, face_bbox, config.FACE_COLOR)
+
+
+def draw_tactical_map(frame, active_tracks, map_size=(320, 180), margin=10):
+    """Draw a tactical-map inset in the bottom-right corner.
+
+    Shows every LOCKED person as a marker (dot + name) plus their recent trail
+    and a short arrow in the direction of current velocity. The map is a scaled
+    2-D view of the camera frame — good enough for situational awareness, not a
+    true top-down projection.
+    """
+    if not active_tracks:
+        return
+
+    fh, fw = frame.shape[:2]
+    mw, mh = map_size
+    x0 = fw - mw - margin
+    y0 = fh - mh - margin
+    if x0 < 0 or y0 < 0:
+        return
+
+    # Semi-transparent dark background
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + mw, y0 + mh), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+    cv2.rectangle(frame, (x0, y0), (x0 + mw, y0 + mh), (180, 180, 180), 1)
+
+    # Title bar
+    cv2.putText(frame, "TACTICAL MAP", (x0 + 8, y0 + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+
+    # Grid (subtle)
+    content_y = y0 + 24
+    content_h = mh - 24
+    for i in range(1, 4):
+        gx = x0 + (mw * i) // 4
+        cv2.line(frame, (gx, content_y), (gx, y0 + mh), (55, 55, 55), 1)
+    for i in range(1, 3):
+        gy = content_y + (content_h * i) // 3
+        cv2.line(frame, (x0, gy), (x0 + mw, gy), (55, 55, 55), 1)
+
+    # Scale: image frame → map area
+    sx = mw / fw
+    sy = content_h / fh
+
+    def to_map(cx, cy):
+        return int(x0 + cx * sx), int(content_y + cy * sy)
+
+    for track in active_tracks:
+        bbox = track.get("bbox")
+        if bbox is None:
+            continue
+        name = (track.get("person_name") or "?").strip() or "?"
+        tid = track.get("track_id", "")
+        history = track.get("bbox_history") or []
+        vx, vy = track.get("velocity", (0.0, 0.0))
+
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        mx, my = to_map(cx, cy)
+
+        # Trail (fading red, oldest → faintest)
+        if len(history) >= 2:
+            pts = []
+            for b in history:
+                hx = (b[0] + b[2]) / 2
+                hy = (b[1] + b[3]) / 2
+                pts.append(to_map(hx, hy))
+            n = len(pts)
+            for i in range(n - 1):
+                alpha = (i + 1) / n
+                color = (int(60 * alpha), int(60 * alpha), int(255 * alpha))
+                cv2.line(frame, pts[i], pts[i + 1], color, 2)
+
+        # Velocity arrow (yellow) — scale slightly so it reads at map size
+        arrow_scale = 3.0
+        ex = int(mx + vx * sx * arrow_scale)
+        ey = int(my + vy * sy * arrow_scale)
+        if (ex - mx) ** 2 + (ey - my) ** 2 > 9:   # only draw if meaningful
+            # Clamp arrow head inside the map
+            ex = max(x0 + 2, min(x0 + mw - 2, ex))
+            ey = max(content_y + 2, min(y0 + mh - 2, ey))
+            cv2.arrowedLine(frame, (mx, my), (ex, ey),
+                            (0, 255, 255), 2, tipLength=0.4)
+
+        # Current position marker
+        cv2.circle(frame, (mx, my), 5, (0, 0, 255), -1)
+        cv2.circle(frame, (mx, my), 6, (255, 255, 255), 1)
+
+        # Label — measure and clamp so it never spills outside the map
+        label = f"{name} [T{tid}]"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        label_x = mx + 8
+        label_y = my + 4
+        if label_x + tw > x0 + mw - 4:
+            label_x = mx - 8 - tw
+        label_x = max(x0 + 4, label_x)
+        label_y = max(content_y + th + 2, min(y0 + mh - 4, label_y))
+        cv2.putText(frame, label, (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
 
 def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces,
@@ -134,6 +437,7 @@ def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces,
         cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (0, 255, 255), 1)
         y += 25
+
 
 
 def _bbox_overlap(box_a, box_b):
@@ -198,12 +502,21 @@ def parse_video_source(source):
 
 
 def main(video_path, output_path=None, threshold=None,
-         frame_skip=None, no_display=False):
-    """Main pipeline for missing person detection in video or webcam."""
-    embeddings_path = config.EMBEDDINGS_FILE
+         frame_skip=None, no_display=False, progress_callback=None):
+    """Main pipeline for missing person detection in video or webcam.
+
+    Args:
+        progress_callback: optional ``callable(frames_done, frames_total)``
+            invoked periodically while processing a finite video. Used by the
+            web UI to drive a progress bar. Ignored for live sources where
+            ``frames_total == 0``.
+    """
+    embeddings_path = resolve_latest_embeddings_path(config.EMBEDDINGS_FILE, config.MISSING_PERSONS_DB_DIR)
     thresh = threshold or config.RECOGNITION_THRESHOLD
     skip = frame_skip or config.FRAME_SKIP
     display = (not no_display) and config.DISPLAY_OUTPUT
+
+    video_path = parse_video_source(video_path)
 
     is_live = isinstance(video_path, int) or (
         isinstance(video_path, str) and video_path.startswith(("rtsp://", "http://", "https://"))
@@ -222,49 +535,12 @@ def main(video_path, output_path=None, threshold=None,
     print(f"  Skip:      every {skip} frames")
     print()
 
-    # === 1. Initialize modules ===
-    print("[1/4] Initializing Person Detector (YOLO)...")
-    person_detector = PersonDetector(
-        model_path=config.YOLO_MODEL_PATH,
-        confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD
+    print("[1/4] Initializing shared detection pipeline...")
+    pipeline = MissingPersonPipeline(
+        threshold=thresh,
+        frame_skip=skip,
+        db_path=embeddings_path,
     )
-
-    print("[2/4] Initializing InsightFace (ArcFace)...")
-    face_app = FaceAnalysis(
-        name=config.INSIGHTFACE_MODEL,
-        providers=["CPUExecutionProvider"]
-    )
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
-
-    face_detector = FaceDetector(
-        app=face_app,
-        det_thresh=config.FACE_DETECTION_THRESHOLD
-    )
-
-    print("[3/4] Initializing Face Recognizer...")
-    face_recognizer = FaceRecognizer(
-        embeddings_path=embeddings_path,
-        threshold=thresh
-    )
-
-    person_tracker = None
-    if config.TRACKING_ENABLED:
-        print("[3.5/4] Initializing Person Tracker (ByteTrack)...")
-        person_tracker = PersonTracker(
-            lost_track_buffer=config.BYTETRACK_LOST_BUFFER,
-            minimum_matching_threshold=config.BYTETRACK_MATCH_THRESHOLD,
-            frame_rate=30,
-            watch_threshold=config.TRACKING_WATCH_THRESHOLD,
-            watch_frames=config.TRACKING_WATCH_FRAMES,
-            trigger_score=config.TRACKING_TRIGGER_SCORE,
-            trigger_high=config.TRACKING_TRIGGER_HIGH,
-            max_watching_frames=config.TRACKING_MAX_WATCHING_FRAMES,
-            reverify_interval=config.LOCKED_REVERIFY_INTERVAL,
-            reverify_ok=config.LOCKED_REVERIFY_OK,
-            reverify_drop=config.LOCKED_REVERIFY_DROP,
-            reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
-            bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
-        )
 
     # === 2. Open video / webcam ===
     print("[4/4] Opening video source...")
@@ -296,11 +572,12 @@ def main(video_path, output_path=None, threshold=None,
         writer = setup_video_writer(cap, output_path)
         print(f"  Saving output to: {output_path}")
 
+    person_tracker = pipeline.person_tracker
+
     # === 3. Frame processing loop ===
     frame_count = 0
     processed_count = 0
     detections_log = []
-    start_time = time.time()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -309,57 +586,18 @@ def main(video_path, output_path=None, threshold=None,
                 continue
             break
 
-        frame_count += 1
+        result = pipeline.process_frame(frame)
+        frame = result["frame"]
+        frame_count = pipeline.frame_count
+        processed_count = pipeline.processed_count
+        persons = result["persons"]
+        face_results = result["faces"]
+        tracking = result["tracking"]
+        match_count = result["match_count"]
 
-        # Skip frames – but still draw active tracking predictions
-        if frame_count % skip != 0:
-            if person_tracker:
-                for pred in person_tracker.get_predicted_boxes():
-                    draw_predicted_track(frame, pred)
-            if writer:
-                writer.write(frame)
-            if display:
-                cv2.imshow("Missing Person Detection", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("\nStopped by user.")
-                    break
-            continue
-
-        processed_count += 1
-
-        # Step 4: Detect persons with YOLO
-        persons = person_detector.detect(frame)
-
-        # Step 5: Detect faces in each person region
-        crops = person_detector.crop_persons(frame, persons)
-        face_results = face_detector.detect_faces_in_crops(crops)
-
-        # Step 6: Tracking mode – ByteTrack + state machine
-        match_count = 0
-        if person_tracker:
-            tracking = person_tracker.update(
-                frame, persons, face_results, face_recognizer
-            )
-
-            # Draw tracked persons by state
-            for track in tracking["tracked"]:
-                draw_tracked_person(frame, track)
-                if track["state"] == TrackState.LOCKED:
-                    match_count += 1
-
-            # Draw untracked faces (those not associated with any track)
-            tracked_person_bboxes = {tuple(t["bbox"]) for t in tracking["tracked"]}
-            for face_info in face_results:
-                pbbox = tuple(face_info["person_bbox"])
-                already_drawn = any(
-                    _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
-                )
-                if not already_drawn:
-                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
-
-            # Log new alerts
+        if tracking["alerts"]:
             for alert in tracking["alerts"]:
-                timestamp = frame_count / video_fps
+                timestamp = frame_count / video_fps if video_fps > 0 else 0.0
                 detections_log.append({
                     "frame": frame_count,
                     "timestamp": timestamp,
@@ -373,43 +611,40 @@ def main(video_path, output_path=None, threshold=None,
                       f"- best_similarity={alert['similarity']:.3f} "
                       f"[Track T{alert['track_id']}]")
 
-        # Step 6 (legacy): Direct matching without tracking
-        else:
-            for person in persons:
-                draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
-
+        # Legacy non-tracking mode: pipeline draws alerts, we only log here.
+        if person_tracker is None and result["processed"]:
             for face_info in face_results:
                 embedding = face_info.get("embedding")
                 if embedding is None:
-                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
                     continue
 
-                name, similarity, person_id = face_recognizer.match(embedding)
+                name, similarity, person_id = pipeline.face_recognizer.match(embedding)
+                if name is None:
+                    continue
 
-                if name is not None:
-                    match_count += 1
-                    draw_alert(frame, face_info, name, similarity)
-                    timestamp = frame_count / video_fps
-                    detections_log.append({
-                        "frame": frame_count,
-                        "timestamp": timestamp,
-                        "person": name,
-                        "person_id": person_id,
-                        "similarity": similarity,
-                        "bbox": face_info["person_bbox"]
-                    })
-                    print(f"  !!! DETECTED: {name} at frame {frame_count} "
-                          f"({timestamp:.1f}s) - similarity={similarity:.3f}")
-                else:
-                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                timestamp = frame_count / video_fps if video_fps > 0 else 0.0
+                detections_log.append({
+                    "frame": frame_count,
+                    "timestamp": timestamp,
+                    "person": name,
+                    "person_id": person_id,
+                    "similarity": similarity,
+                    "bbox": face_info["person_bbox"]
+                })
+                print(f"  !!! DETECTED: {name} at frame {frame_count} "
+                      f"({timestamp:.1f}s) - similarity={similarity:.3f}")
 
-        # Step 7: Draw info overlay
-        elapsed = time.time() - start_time
-        current_fps = processed_count / elapsed if elapsed > 0 else 0
-        active_tracks = len(person_tracker._active_tracks()) if person_tracker else 0
-        draw_info_overlay(frame, frame_count, current_fps,
-                          len(persons), len(face_results), match_count,
-                          active_tracks if person_tracker else None)
+        active_tracks = len(tracking["active"]) if person_tracker else 0
+        current_fps = pipeline.current_fps()
+        draw_info_overlay(
+            frame,
+            frame_count,
+            current_fps,
+            len(persons),
+            len(face_results),
+            match_count,
+            active_tracks if person_tracker else None,
+        )
 
         # Step 8: Display / write video
         if display:
@@ -422,20 +657,36 @@ def main(video_path, output_path=None, threshold=None,
             writer.write(frame)
 
         # Progress
-        if not is_live and processed_count % 20 == 0:
+        if not is_live and result["processed"] and processed_count % 20 == 0:
             progress = frame_count / total_frames * 100 if total_frames > 0 else 0
             print(f"  Progress: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
                   f"FPS: {current_fps:.1f} | Persons: {len(persons)} | "
                   f"Faces: {len(face_results)} | Active tracks: {active_tracks}")
 
+        # Optional progress callback for the web UI's loading bar. Fired
+        # every few frames to avoid lock contention on the job-state dict.
+        if progress_callback is not None and not is_live and total_frames > 0:
+            if frame_count % 5 == 0 or frame_count == total_frames:
+                try:
+                    progress_callback(frame_count, total_frames)
+                except Exception:
+                    pass  # never let UI plumbing kill the detection loop
+
+
     # === 9. Cleanup and report ===
+    if progress_callback is not None and not is_live and total_frames > 0:
+        try:
+            progress_callback(total_frames, total_frames)
+        except Exception:
+            pass
+
     cap.release()
     if writer:
         writer.release()
     if display:
         cv2.destroyAllWindows()
 
-    elapsed_total = time.time() - start_time
+    elapsed_total = time.time() - pipeline.started_at
     print(f"\nCompleted in {elapsed_total:.1f}s")
     print(f"Processed {processed_count} frames (skipped {frame_count - processed_count})")
 
@@ -445,50 +696,12 @@ def main(video_path, output_path=None, threshold=None,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Missing person detection in crowd video or live webcam"
-    )
-    source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(
-        "--video",
-        help="Path to input video file or stream URL (rtsp://, http://)"
-    )
-    source_group.add_argument(
-        "--webcam", action="store_true",
-        help="Use webcam for real-time detection"
-    )
-    parser.add_argument(
-        "--camera-id", type=int, default=0,
-        help="Camera device index (default: 0, used with --webcam)"
-    )
-    parser.add_argument(
-        "--output", default=None,
-        help="Path to save output video (optional)"
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=None,
-        help="Cosine similarity threshold (overrides config)"
-    )
-    parser.add_argument(
-        "--skip", type=int, default=None,
-        help="Process every N frames (overrides config)"
-    )
-    parser.add_argument(
-        "--no-display", action="store_true",
-        help="Disable video display window"
-    )
-
-    args = parser.parse_args()
-
-    if args.webcam:
-        video_source = args.camera_id
-    else:
-        video_source = parse_video_source(args.video)
+    video_source = 1
 
     main(
         video_path=video_source,
-        output_path=args.output,
-        threshold=args.threshold,
-        frame_skip=args.skip,
-        no_display=args.no_display
+        output_path=None,
+        threshold=None,
+        frame_skip=None,
+        no_display=False,
     )

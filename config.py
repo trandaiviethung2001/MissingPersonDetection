@@ -10,8 +10,10 @@ EMBEDDINGS_FILE = os.path.join(MISSING_PERSONS_DB_DIR, "embeddings.pkl")
 YOLO_MODEL_PATH = "yolov8n.pt"  # Auto-downloads if not found
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 YOLO_CONFIDENCE_THRESHOLD = 0.5
+YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "416"))
 YOLO_PERSON_CLASS_ID = 0  # COCO class 0 = "person"
 INSIGHTFACE_MODEL = "buffalo_l"
+INSIGHTFACE_DET_SIZE = int(os.getenv("INSIGHTFACE_DET_SIZE", "320"))
 FACE_DETECTION_THRESHOLD = 0.5
 RECOGNITION_THRESHOLD = 0.4
 FRAME_SKIP = 5  # Process every N frames
@@ -38,7 +40,12 @@ LOCKED_REVERIFY_OK = 0.35             # similarity >= this → re-verify passed
 LOCKED_REVERIFY_DROP = 0.25           # similarity < this → re-verify failed
 LOCKED_REVERIFY_MAX_FAILS = 3         # Consecutive re-verify fails → drop track
 LOCKED_BBOX_LOST_TIMEOUT = 2.0        # Seconds without bbox → drop track
+LOCKED_PREDICT_DRAW_TIMEOUT = 0.5     # Seconds to keep drawing phantom predictions
+LOCKED_OUT_OF_FRAME_MARGIN = 0.6      # Drop track when >this fraction of bbox left the frame
 
 # --- Colors ---
 WATCHING_COLOR = (0, 165, 255)        # Orange – WATCHING state box
 LOCKED_COLOR = (0, 0, 255)            # Red – LOCKED state box
+
+# --- Tactical map overlay ---
+TACTICAL_MAP_ENABLED = True           # Draw top-down map inset for LOCKED persons
