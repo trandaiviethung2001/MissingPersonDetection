@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor
 import sys
 import threading
 import time
@@ -17,8 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import config as detector_config  # noqa: E402
-from detect_missing_person import MissingPersonPipeline, draw_info_overlay  # noqa: E402
+from detect_missing_person import (  # noqa: E402
+    MissingPersonPipeline,
+    draw_info_overlay,
+    draw_predicted_track,
+    draw_tracked_person,
+)
 from utils import TrackState  # noqa: E402
 
 
@@ -28,6 +33,10 @@ class RuntimeStats:
     processed_count: int = 0
     started_at: float = 0.0
     last_telemetry_at: float = 0.0
+    persons_count: int = 0
+    faces_count: int = 0
+    match_count: int = 0
+    active_tracks: int = 0
 
 
 class DetectorRuntime:
@@ -49,10 +58,15 @@ class DetectorRuntime:
         self._manual_status = "IDLE"
         self._recording_enabled = False
         self._latest_frame = None
+        self._latest_tracked: list[dict[str, Any]] = []
+        self._latest_tracked_updated_at = 0.0
+        self._track_hold_seconds = 1.5
         self._current_detection: dict[str, Any] | None = None
         self._last_detection_sent: dict[str, Any] | None = None
         self._camera_opened = False
         self._last_error: str | None = None
+        self._detection_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detector-runtime")
+        self._pending_detection: Future[dict[str, Any]] | None = None
 
     def ensure_started(self) -> None:
         with self._lock:
@@ -146,6 +160,8 @@ class DetectorRuntime:
         with self._lock:
             return {
                 "camera_source": self.settings.camera_source,
+                "camera_width": self.settings.camera_width,
+                "camera_height": self.settings.camera_height,
                 "frame_skip": self.settings.frame_skip,
                 "threshold": self.settings.threshold,
                 "db_path": str(self.settings.db_path),
@@ -173,6 +189,11 @@ class DetectorRuntime:
             thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
+
+        pending = self._pending_detection
+        if pending is not None:
+            pending.cancel()
+        self._detection_executor.shutdown(wait=False, cancel_futures=True)
 
         with self._lock:
             self._release_capture()
@@ -209,28 +230,34 @@ class DetectorRuntime:
                     time.sleep(0.1)
                     continue
 
-                now = time.time()
-                annotated = frame.copy()
+                now = time.perf_counter()
 
                 with self._lock:
-                    self._latest_frame = annotated.copy()
+                    self._latest_frame = frame.copy()
                     mission_active = self._mission_active
                     recording_enabled = self._recording_enabled
-                    pipeline = self._pipeline
+                self._resolve_pending_detection(allow_apply=mission_active)
 
-                if mission_active and pipeline is not None:
-                    annotated = self._process_detection_frame(annotated, pipeline)
+                if mission_active:
+                    self._schedule_detection(frame)
                 else:
+                    with self._lock:
+                        self._latest_tracked = []
+                        self._latest_tracked_updated_at = 0.0
                     self._send_detection_if_changed(self._empty_detection())
 
+                stream_frame = None
                 if now - last_stream_sent >= max(0.01, 1.0 / self.settings.stream_fps):
-                    self._broadcast_frame(annotated)
+                    stream_frame = self._frame_for_stream(frame)
+                    self._broadcast_frame(stream_frame)
                     last_stream_sent = now
 
-                self._maybe_send_telemetry(now)
+                self._maybe_send_telemetry(time.time())
 
                 if recording_enabled:
-                    self._write_recording(annotated)
+                    if stream_frame is None:
+                        stream_frame = self._frame_for_stream(frame)
+                    self._write_recording(stream_frame)
         except Exception as exc:
             with self._lock:
                 self._mission_active = False
@@ -244,6 +271,7 @@ class DetectorRuntime:
             )
             self._broadcast({"type": "status", "data": {"system": "EMERGENCY"}})
         finally:
+            self._resolve_pending_detection(allow_apply=False)
             with self._lock:
                 self._release_capture()
                 self._close_writer()
@@ -263,6 +291,9 @@ class DetectorRuntime:
             if self._capture is not None and self._capture.isOpened():
                 return
             self._capture = cv2.VideoCapture(self.settings.camera_source)
+            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
+            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
+            self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not self._capture.isOpened():
                 self._camera_opened = False
                 raise RuntimeError(f"Cannot open camera/video source: {self.settings.camera_source}")
@@ -278,7 +309,7 @@ class DetectorRuntime:
 
         ok, frame = capture.read()
         if ok:
-            return frame
+            return self._normalize_frame(frame)
 
         with self._lock:
             self._release_capture()
@@ -289,27 +320,32 @@ class DetectorRuntime:
                 return None
         return None
 
-    def _process_detection_frame(self, frame, pipeline: MissingPersonPipeline):
+    def _normalize_frame(self, frame):
+        target_size = (self.settings.camera_width, self.settings.camera_height)
+        current_size = (frame.shape[1], frame.shape[0])
+        if current_size == target_size:
+            return frame
+        return cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+
+    def _process_detection_frame(self, frame, pipeline: MissingPersonPipeline) -> dict[str, Any]:
         result = pipeline.process_frame(frame)
-        self._stats.frame_count = pipeline.frame_count
-        self._stats.processed_count = pipeline.processed_count
 
         strongest = self._pick_strongest_track(result["tracking"]["tracked"])
         detection = self._build_detection_payload(strongest, frame.shape)
-        self._send_detection_if_changed(detection)
-        self._send_status("LOCKED" if strongest and strongest["state"] == TrackState.LOCKED else "SCANNING")
-
         active_tracks = len(pipeline.person_tracker._active_tracks()) if pipeline.person_tracker else 0
-        draw_info_overlay(
-            frame,
-            self._stats.frame_count,
-            pipeline.current_fps(),
-            len(result["persons"]),
-            len(result["faces"]),
-            result["match_count"],
-            active_tracks if pipeline.person_tracker else None,
-        )
-        return frame
+        return {
+            "frame": result["frame"],
+            "processed": result["processed"],
+            "tracked": result["tracking"]["tracked"],
+            "detection": detection,
+            "status": "LOCKED" if strongest and strongest["state"] == TrackState.LOCKED else "SCANNING",
+            "frame_count": pipeline.frame_count,
+            "processed_count": pipeline.processed_count,
+            "active_tracks": active_tracks,
+            "persons_count": len(result["persons"]),
+            "faces_count": len(result["faces"]),
+            "match_count": result["match_count"],
+        }
 
     def _pick_strongest_track(self, tracked: list[dict[str, Any]]) -> dict[str, Any] | None:
         candidates = [item for item in tracked if item["state"] in {TrackState.WATCHING, TrackState.LOCKED}]
@@ -369,6 +405,94 @@ class DetectorRuntime:
                 return
             self._manual_status = status
         self._broadcast({"type": "status", "data": {"system": status}})
+
+    def _schedule_detection(self, frame) -> None:
+        with self._lock:
+            if self._pipeline is None:
+                return
+            pending = self._pending_detection
+            if pending is not None and not pending.done():
+                return
+            pipeline = self._pipeline
+
+        self._pending_detection = self._detection_executor.submit(
+            self._process_detection_frame,
+            frame.copy(),
+            pipeline,
+        )
+
+    def _resolve_pending_detection(self, allow_apply: bool) -> None:
+        pending = self._pending_detection
+        if pending is None or not pending.done():
+            return
+
+        self._pending_detection = None
+        result = pending.result()
+        if not allow_apply:
+            return
+
+        now = time.time()
+        self._stats.frame_count = result["frame_count"]
+        self._stats.processed_count = result["processed_count"]
+        self._stats.active_tracks = result["active_tracks"]
+
+        if not result["processed"]:
+            return
+
+        with self._lock:
+            if result["tracked"]:
+                self._latest_tracked = list(result["tracked"])
+                self._latest_tracked_updated_at = now
+            elif now - self._latest_tracked_updated_at > self._track_hold_seconds:
+                self._latest_tracked = []
+            holding_previous_track = not result["tracked"] and bool(self._latest_tracked)
+        self._stats.persons_count = result["persons_count"]
+        self._stats.faces_count = result["faces_count"]
+        self._stats.match_count = result["match_count"]
+        if holding_previous_track:
+            return
+        self._send_detection_if_changed(result["detection"])
+        self._send_status(result["status"])
+
+    def _frame_for_stream(self, fallback_frame):
+        with self._lock:
+            mission_active = self._mission_active
+            tracked = list(self._latest_tracked)
+            stats = {
+                "frame_count": self._stats.frame_count,
+                "processed_count": self._stats.processed_count,
+                "persons_count": self._stats.persons_count,
+                "faces_count": self._stats.faces_count,
+                "match_count": self._stats.match_count,
+                "active_tracks": self._stats.active_tracks,
+            }
+            pipeline = self._pipeline
+
+        if not mission_active:
+            return fallback_frame
+
+        frame = fallback_frame.copy()
+        if pipeline is not None and pipeline.person_tracker is not None:
+            predicted_ids = set()
+            for pred in pipeline.person_tracker.peek_predicted_boxes():
+                predicted_ids.add(int(pred["track_id"]))
+                draw_predicted_track(frame, pred)
+
+            for track in tracked:
+                if track["state"] == TrackState.LOCKED and int(track["track_id"]) in predicted_ids:
+                    continue
+                draw_tracked_person(frame, track)
+
+        draw_info_overlay(
+            frame,
+            stats["frame_count"],
+            pipeline.current_fps() if pipeline is not None else 0.0,
+            stats["persons_count"],
+            stats["faces_count"],
+            stats["match_count"],
+            stats["active_tracks"],
+        )
+        return frame
 
     def _effective_status(self) -> str:
         with self._lock:

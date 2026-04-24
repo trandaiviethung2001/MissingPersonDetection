@@ -443,14 +443,28 @@ class PersonTracker:
                 predicted = tp.predict_next_bbox()
                 if predicted:
                     tp.last_bbox = predicted
-                    results.append({
-                        "track_id": tp.track_id,
-                        "bbox": predicted,
-                        "person_name": tp.person_name,
-                        "person_id": tp.person_id,
-                        "best_similarity": tp.best_similarity,
-                    })
+                    results.append(self._prediction_payload(tp, predicted))
         return results
+
+    def peek_predicted_boxes(self):
+        """Return predicted bboxes without advancing tracker state."""
+        results = []
+        for tp in self.tracked_persons.values():
+            if tp.state == TrackState.LOCKED:
+                predicted = tp.predict_next_bbox()
+                if predicted:
+                    results.append(self._prediction_payload(tp, predicted))
+        return results
+
+    @staticmethod
+    def _prediction_payload(tp, bbox):
+        return {
+            "track_id": tp.track_id,
+            "bbox": bbox,
+            "person_name": tp.person_name,
+            "person_id": tp.person_id,
+            "best_similarity": tp.best_similarity,
+        }
 
     # ------------------------------------------------------------------
     # Internals

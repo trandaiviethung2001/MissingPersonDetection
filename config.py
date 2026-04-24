@@ -10,8 +10,10 @@ EMBEDDINGS_FILE = os.path.join(MISSING_PERSONS_DB_DIR, "embeddings.pkl")
 YOLO_MODEL_PATH = "yolov8n.pt"  # Auto-downloads if not found
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 YOLO_CONFIDENCE_THRESHOLD = 0.5
+YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "416"))
 YOLO_PERSON_CLASS_ID = 0  # COCO class 0 = "person"
 INSIGHTFACE_MODEL = "buffalo_l"
+INSIGHTFACE_DET_SIZE = int(os.getenv("INSIGHTFACE_DET_SIZE", "320"))
 FACE_DETECTION_THRESHOLD = 0.5
 RECOGNITION_THRESHOLD = 0.4
 FRAME_SKIP = 5  # Process every N frames

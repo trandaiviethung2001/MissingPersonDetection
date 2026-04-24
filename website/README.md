@@ -40,7 +40,11 @@ Open `http://localhost:8765/training` for quick face training.
 ## Environment variables
 
 - `LOST_PERSON_CAMERA_SOURCE=0`
+- `LOST_PERSON_CAMERA_WIDTH=512`
+- `LOST_PERSON_CAMERA_HEIGHT=288`
 - `LOST_PERSON_DB_PATH=..\..\missing_persons_db\embeddings.pkl`
 - `LOST_PERSON_FRAME_SKIP=5`
 - `LOST_PERSON_THRESHOLD=0.4`
-- `LOST_PERSON_STREAM_FPS=10`
+- `LOST_PERSON_STREAM_FPS=24`
+- `YOLO_IMAGE_SIZE=416`
+- `INSIGHTFACE_DET_SIZE=320`

@@ -9,6 +9,8 @@ let tacticalMap = null;
 let userMarker = null;
 let lastGeocodeKey = null;
 let geocodeAbortController = null;
+let pendingFrameData = null;
+let frameRenderQueued = false;
 
 const el = {};
 
@@ -84,13 +86,61 @@ function handleMessage(msg) {
     } else if (msg.type === "status") {
         updateStatus(msg.data.system);
     } else if (msg.type === "frame") {
-        el.videoStream.src = "data:image/jpeg;base64," + msg.data;
-        el.videoStream.classList.add("active");
-        el.feedPlaceholder.style.display = "none";
+        queueFrameRender(msg.data);
     } else if (msg.type === "ack") {
         handleAck(msg.data);
     } else if (msg.type === "config") {
-        console.log("runtime", msg.data);
+        applyRuntimeConfig(msg.data);
+    }
+}
+
+function applyRuntimeConfig(data) {
+    console.log("runtime", data);
+
+    if (data.last_error) {
+        el.aiStatusText.textContent = "AI error: " + data.last_error;
+        el.aiStatusBox.classList.remove("scanning");
+        el.aiStatusBox.classList.add("detected");
+        toast("AI startup error: " + data.last_error, "danger");
+        return;
+    }
+
+    if (data.mission_active) {
+        el.aiStatusText.textContent = "Mission active";
+        el.aiStatusBox.classList.add("scanning");
+        el.aiStatusBox.classList.remove("detected");
+        return;
+    }
+
+    el.aiStatusText.textContent = "Ready - press Start Mission";
+    el.aiStatusBox.classList.remove("scanning", "detected");
+}
+
+function queueFrameRender(frameData) {
+    pendingFrameData = frameData;
+    if (frameRenderQueued) {
+        return;
+    }
+
+    frameRenderQueued = true;
+    requestAnimationFrame(renderLatestFrame);
+}
+
+function renderLatestFrame() {
+    frameRenderQueued = false;
+    if (!pendingFrameData) {
+        return;
+    }
+
+    const frameData = pendingFrameData;
+    pendingFrameData = null;
+    el.videoStream.src = "data:image/jpeg;base64," + frameData;
+    el.videoStream.classList.add("active");
+    el.feedPlaceholder.style.display = "none";
+
+    if (pendingFrameData) {
+        frameRenderQueued = true;
+        requestAnimationFrame(renderLatestFrame);
     }
 }
 
@@ -102,6 +152,9 @@ function handleAck(data) {
     } else if (data.command === "lock_target" && !data.success) {
         toast("No active target available to lock", "warning");
     } else if (data.command === "runtime_error") {
+        el.aiStatusText.textContent = "AI error: " + (data.detail || "Runtime error");
+        el.aiStatusBox.classList.remove("scanning");
+        el.aiStatusBox.classList.add("detected");
         toast(data.detail || "Runtime error", "danger");
     }
 }
@@ -146,11 +199,7 @@ function updateDetection(data) {
     }
 
     el.confidenceBox.classList.add("visible");
-    el.detectionBox.classList.add("visible");
-    el.detectionBox.style.left = (data.bbox.x * 100) + "%";
-    el.detectionBox.style.top = (data.bbox.y * 100) + "%";
-    el.detectionBox.style.width = (data.bbox.w * 100) + "%";
-    el.detectionBox.style.height = (data.bbox.h * 100) + "%";
+    el.detectionBox.classList.remove("visible");
     el.btnLock.disabled = false;
 
     if (data.status === "LOCKED") {

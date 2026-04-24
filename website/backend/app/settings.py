@@ -23,6 +23,8 @@ class AppSettings:
     training_dir: Path
     missing_persons_db_dir: Path
     camera_source: int | str
+    camera_width: int
+    camera_height: int
     frame_skip: int
     threshold: float
     jpeg_quality: int
@@ -55,10 +57,12 @@ class AppSettings:
             recording_dir=recording_dir,
             training_dir=training_dir,
             missing_persons_db_dir=missing_persons_db_dir,
-            camera_source=_parse_camera_source(os.getenv("LOST_PERSON_CAMERA_SOURCE", "0")),
+            camera_source=_parse_camera_source(os.getenv("LOST_PERSON_CAMERA_SOURCE", "1")),
+            camera_width=int(os.getenv("LOST_PERSON_CAMERA_WIDTH", "1280")),
+            camera_height=int(os.getenv("LOST_PERSON_CAMERA_HEIGHT", "720")),
             frame_skip=int(os.getenv("LOST_PERSON_FRAME_SKIP", "5")),
             threshold=float(os.getenv("LOST_PERSON_THRESHOLD", "0.4")),
-            jpeg_quality=int(os.getenv("LOST_PERSON_JPEG_QUALITY", "80")),
-            stream_fps=float(os.getenv("LOST_PERSON_STREAM_FPS", "10")),
+            jpeg_quality=int(os.getenv("LOST_PERSON_JPEG_QUALITY", "55")),
+            stream_fps=float(os.getenv("LOST_PERSON_STREAM_FPS", "24")),
             db_path=Path(os.getenv("LOST_PERSON_DB_PATH", str(db_default))),
         )
