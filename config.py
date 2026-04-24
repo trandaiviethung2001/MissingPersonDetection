@@ -40,7 +40,12 @@ LOCKED_REVERIFY_OK = 0.35             # similarity >= this → re-verify passed
 LOCKED_REVERIFY_DROP = 0.25           # similarity < this → re-verify failed
 LOCKED_REVERIFY_MAX_FAILS = 3         # Consecutive re-verify fails → drop track
 LOCKED_BBOX_LOST_TIMEOUT = 2.0        # Seconds without bbox → drop track
+LOCKED_PREDICT_DRAW_TIMEOUT = 0.5     # Seconds to keep drawing phantom predictions
+LOCKED_OUT_OF_FRAME_MARGIN = 0.6      # Drop track when >this fraction of bbox left the frame
 
 # --- Colors ---
 WATCHING_COLOR = (0, 165, 255)        # Orange – WATCHING state box
 LOCKED_COLOR = (0, 0, 255)            # Red – LOCKED state box
+
+# --- Tactical map overlay ---
+TACTICAL_MAP_ENABLED = True           # Draw top-down map inset for LOCKED persons

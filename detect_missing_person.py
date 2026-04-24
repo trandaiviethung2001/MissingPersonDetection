@@ -78,6 +78,8 @@ class MissingPersonPipeline:
                 reverify_drop=config.LOCKED_REVERIFY_DROP,
                 reverify_max_fails=config.LOCKED_REVERIFY_MAX_FAILS,
                 bbox_lost_timeout=config.LOCKED_BBOX_LOST_TIMEOUT,
+                predict_draw_timeout=config.LOCKED_PREDICT_DRAW_TIMEOUT,
+                out_of_frame_margin=config.LOCKED_OUT_OF_FRAME_MARGIN,
             )
 
         self.frame_count = 0
@@ -90,10 +92,17 @@ class MissingPersonPipeline:
 
         if self.frame_count % self.frame_skip != 0:
             predictions = []
+            active_tracks = []
             if self.person_tracker:
-                predictions = self.person_tracker.get_predicted_boxes()
+                # Only draw LOCKED tracks on skipped frames — redrawing every
+                # active track was adding a putText per bbox per skipped frame
+                # which noticeably dragged down the capture FPS.
+                predictions = self.person_tracker.get_predicted_boxes(locked_only=True)
                 for pred in predictions:
                     draw_predicted_track(frame, pred)
+                active_tracks = self.person_tracker._active_tracks()
+            if config.TACTICAL_MAP_ENABLED and active_tracks:
+                draw_tactical_map(frame, active_tracks)
             return {
                 "frame": frame,
                 "processed": False,
@@ -102,7 +111,7 @@ class MissingPersonPipeline:
                 "tracking": {
                     "tracked": [],
                     "alerts": [],
-                    "active": self.person_tracker._active_tracks() if self.person_tracker else [],
+                    "active": active_tracks,
                 },
                 "match_count": 0,
                 "predictions": predictions,
@@ -154,6 +163,9 @@ class MissingPersonPipeline:
                 if name is not None:
                     match_count += 1
                     draw_alert(frame, face_info, name, similarity)
+
+        if config.TACTICAL_MAP_ENABLED and tracking.get("active"):
+            draw_tactical_map(frame, tracking["active"])
 
         return {
             "frame": frame,
@@ -219,6 +231,12 @@ def draw_tracked_person(frame, track_info):
     tid = track_info.get("track_id", "")
     best_sim = track_info.get("best_similarity", 0)
 
+    def _face_bbox_for(track):
+        face_info = track.get("face_info")
+        if face_info and face_info.get("face_bbox") is not None:
+            return face_info["face_bbox"]
+        return track.get("face_bbox_predicted")
+
     if state == TrackState.LOCKED:
         confidence = best_sim * 100
         label = f"LOCKED: {name} ({confidence:.0f}%) [T{tid}]"
@@ -229,24 +247,24 @@ def draw_tracked_person(frame, track_info):
         cv2.putText(frame, "! ALERT !", (x1, y2 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        face_info = track_info.get("face_info")
-        if face_info:
-            draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+        face_bbox = _face_bbox_for(track_info)
+        if face_bbox is not None:
+            draw_face_box(frame, face_bbox, config.FACE_COLOR)
 
     elif state == TrackState.WATCHING:
         sim = track_info.get("similarity", 0)
         label = f"WATCHING: {name or '?'} [{sim:.0%}] [T{tid}]"
         draw_person_box(frame, bbox, config.WATCHING_COLOR, label)
-        face_info = track_info.get("face_info")
-        if face_info:
-            draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+        face_bbox = _face_bbox_for(track_info)
+        if face_bbox is not None:
+            draw_face_box(frame, face_bbox, config.FACE_COLOR)
 
     else:
         draw_person_box(frame, bbox, config.PERSON_COLOR)
 
 
 def draw_predicted_track(frame, pred):
-    """Draw predicted bbox for a TRACKING person on skipped frames."""
+    """Draw predicted bbox for a LOCKED person on skipped frames."""
     bbox = pred["bbox"]
     name = pred.get("person_name", "?")
     tid = pred.get("track_id", "")
@@ -264,6 +282,111 @@ def draw_predicted_track(frame, pred):
     cv2.putText(frame, label, (x1, y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, config.FONT_SCALE,
                 (255, 255, 255), config.FONT_THICKNESS)
+
+    # Draw face overlay from the cached face offset so the green face box
+    # stays with the person even between face-detection frames.
+    face_bbox = pred.get("face_bbox_predicted")
+    if face_bbox is not None:
+        draw_face_box(frame, face_bbox, config.FACE_COLOR)
+
+
+def draw_tactical_map(frame, active_tracks, map_size=(320, 180), margin=10):
+    """Draw a tactical-map inset in the bottom-right corner.
+
+    Shows every LOCKED person as a marker (dot + name) plus their recent trail
+    and a short arrow in the direction of current velocity. The map is a scaled
+    2-D view of the camera frame — good enough for situational awareness, not a
+    true top-down projection.
+    """
+    if not active_tracks:
+        return
+
+    fh, fw = frame.shape[:2]
+    mw, mh = map_size
+    x0 = fw - mw - margin
+    y0 = fh - mh - margin
+    if x0 < 0 or y0 < 0:
+        return
+
+    # Semi-transparent dark background
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + mw, y0 + mh), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+    cv2.rectangle(frame, (x0, y0), (x0 + mw, y0 + mh), (180, 180, 180), 1)
+
+    # Title bar
+    cv2.putText(frame, "TACTICAL MAP", (x0 + 8, y0 + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+
+    # Grid (subtle)
+    content_y = y0 + 24
+    content_h = mh - 24
+    for i in range(1, 4):
+        gx = x0 + (mw * i) // 4
+        cv2.line(frame, (gx, content_y), (gx, y0 + mh), (55, 55, 55), 1)
+    for i in range(1, 3):
+        gy = content_y + (content_h * i) // 3
+        cv2.line(frame, (x0, gy), (x0 + mw, gy), (55, 55, 55), 1)
+
+    # Scale: image frame → map area
+    sx = mw / fw
+    sy = content_h / fh
+
+    def to_map(cx, cy):
+        return int(x0 + cx * sx), int(content_y + cy * sy)
+
+    for track in active_tracks:
+        bbox = track.get("bbox")
+        if bbox is None:
+            continue
+        name = (track.get("person_name") or "?").strip() or "?"
+        tid = track.get("track_id", "")
+        history = track.get("bbox_history") or []
+        vx, vy = track.get("velocity", (0.0, 0.0))
+
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        mx, my = to_map(cx, cy)
+
+        # Trail (fading red, oldest → faintest)
+        if len(history) >= 2:
+            pts = []
+            for b in history:
+                hx = (b[0] + b[2]) / 2
+                hy = (b[1] + b[3]) / 2
+                pts.append(to_map(hx, hy))
+            n = len(pts)
+            for i in range(n - 1):
+                alpha = (i + 1) / n
+                color = (int(60 * alpha), int(60 * alpha), int(255 * alpha))
+                cv2.line(frame, pts[i], pts[i + 1], color, 2)
+
+        # Velocity arrow (yellow) — scale slightly so it reads at map size
+        arrow_scale = 3.0
+        ex = int(mx + vx * sx * arrow_scale)
+        ey = int(my + vy * sy * arrow_scale)
+        if (ex - mx) ** 2 + (ey - my) ** 2 > 9:   # only draw if meaningful
+            # Clamp arrow head inside the map
+            ex = max(x0 + 2, min(x0 + mw - 2, ex))
+            ey = max(content_y + 2, min(y0 + mh - 2, ey))
+            cv2.arrowedLine(frame, (mx, my), (ex, ey),
+                            (0, 255, 255), 2, tipLength=0.4)
+
+        # Current position marker
+        cv2.circle(frame, (mx, my), 5, (0, 0, 255), -1)
+        cv2.circle(frame, (mx, my), 6, (255, 255, 255), 1)
+
+        # Label — measure and clamp so it never spills outside the map
+        label = f"{name} [T{tid}]"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        label_x = mx + 8
+        label_y = my + 4
+        if label_x + tw > x0 + mw - 4:
+            label_x = mx - 8 - tw
+        label_x = max(x0 + 4, label_x)
+        label_y = max(content_y + th + 2, min(y0 + mh - 4, label_y))
+        cv2.putText(frame, label, (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
 
 def draw_info_overlay(frame, frame_count, fps, total_persons, total_faces,

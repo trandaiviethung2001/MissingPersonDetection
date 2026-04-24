@@ -11,6 +11,7 @@ let lastGeocodeKey = null;
 let geocodeAbortController = null;
 let pendingFrameData = null;
 let frameRenderQueued = false;
+const lockMarkers = new Map();    // key: targetId (e.g. "T1") -> L.marker
 
 const el = {};
 
@@ -91,6 +92,8 @@ function handleMessage(msg) {
         handleAck(msg.data);
     } else if (msg.type === "config") {
         applyRuntimeConfig(msg.data);
+    } else if (msg.type === "lock_event") {
+        handleLockEvent(msg.data);
     }
 }
 
@@ -338,6 +341,83 @@ function updateMapLocation(latitude, longitude, accuracy) {
     if (userMarker) {
         userMarker.setLatLng(location);
     }
+}
+
+function formatLockTimestamp(isoString) {
+    if (!isoString) return "—";
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return isoString;
+    return date.toLocaleString();
+}
+
+function buildLockPopupHtml(data) {
+    const name = data.personName || "Unknown";
+    const when = formatLockTimestamp(data.timestamp);
+    const conf = data.confidence != null ? `${data.confidence}%` : "—";
+    const img = data.imageUrl
+        ? `<img src="${data.imageUrl}" alt="${name}" class="lock-popup-img">`
+        : "";
+    return (
+        `<div class="lock-popup">
+            ${img}
+            <div class="lock-popup-body">
+                <div class="lock-popup-name">${name}</div>
+                <div class="lock-popup-meta">Locked at ${when}</div>
+                <div class="lock-popup-meta">Confidence ${conf}</div>
+                <div class="lock-popup-meta">${data.targetId || ""}</div>
+            </div>
+        </div>`
+    );
+}
+
+function lockMarkerLocation() {
+    // Start from the user's current GPS fix; if we don't have one yet fall
+    // back to the map default view. Small pseudo-random jitter keeps markers
+    // from stacking exactly on top of each other when locks happen nearby.
+    let base;
+    if (userMarker) {
+        const latlng = userMarker.getLatLng();
+        base = [latlng.lat, latlng.lng];
+    } else if (tacticalMap) {
+        const c = tacticalMap.getCenter();
+        base = [c.lat, c.lng];
+    } else {
+        base = [37.5665, 126.9780];
+    }
+    const jitter = () => (Math.random() - 0.5) * 0.00025;   // ~ ±15 m
+    return [base[0] + jitter(), base[1] + jitter()];
+}
+
+function handleLockEvent(data) {
+    if (!data || !data.targetId) return;
+    if (!tacticalMap) initMap();
+    if (!tacticalMap) return;
+
+    const existing = lockMarkers.get(data.targetId);
+    if (existing) {
+        // Same target relocked — refresh popup, don't spawn a duplicate marker
+        existing.setPopupContent(buildLockPopupHtml(data));
+        return;
+    }
+
+    const [lat, lng] = lockMarkerLocation();
+    const marker = L.marker([lat, lng], { title: data.personName || "Locked target" }).addTo(tacticalMap);
+    marker.bindPopup(buildLockPopupHtml(data), {
+        className: "lock-popup-wrapper",
+        maxWidth: 240,
+        closeButton: false,
+    });
+    // Open on hover, close when the pointer leaves both the marker and popup
+    marker.on("mouseover", () => marker.openPopup());
+    marker.on("mouseout", () => {
+        setTimeout(() => {
+            const popupEl = marker.getPopup()?.getElement();
+            if (!popupEl || !popupEl.matches(":hover")) marker.closePopup();
+        }, 60);
+    });
+
+    lockMarkers.set(data.targetId, marker);
+    toast(`${data.personName || "Target"} locked`, "success");
 }
 
 async function reverseGeocode(latitude, longitude) {

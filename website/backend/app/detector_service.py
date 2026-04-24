@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 import sys
 import threading
@@ -67,6 +68,10 @@ class DetectorRuntime:
         self._last_error: str | None = None
         self._detection_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detector-runtime")
         self._pending_detection: Future[dict[str, Any]] | None = None
+        # Track IDs we've already emitted a `lock_event` for this runtime. A
+        # new event is emitted the first time a track enters LOCKED state;
+        # duplicates are suppressed so the map gets one marker per lock.
+        self._lock_events_seen: set[int] = set()
 
     def ensure_started(self) -> None:
         with self._lock:
@@ -209,6 +214,9 @@ class DetectorRuntime:
         with self._lock:
             self._pipeline = fresh_pipeline
             self._last_error = None
+            # New pipeline = new tracker = new track-id space, so the previous
+            # lock-event dedupe set no longer applies.
+            self._lock_events_seen.clear()
 
     def _ensure_thread(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -333,6 +341,11 @@ class DetectorRuntime:
         strongest = self._pick_strongest_track(result["tracking"]["tracked"])
         detection = self._build_detection_payload(strongest, frame.shape)
         active_tracks = len(pipeline.person_tracker._active_tracks()) if pipeline.person_tracker else 0
+
+        # Snapshot a clear face crop the first time each track enters LOCKED,
+        # so the frontend can drop a marker on the tactical map with the image.
+        fresh_locks = self._capture_fresh_lock_snapshots(frame, result["tracking"]["tracked"])
+
         return {
             "frame": result["frame"],
             "processed": result["processed"],
@@ -345,7 +358,90 @@ class DetectorRuntime:
             "persons_count": len(result["persons"]),
             "faces_count": len(result["faces"]),
             "match_count": result["match_count"],
+            "fresh_locks": fresh_locks,
         }
+
+    def _capture_fresh_lock_snapshots(self, frame, tracked) -> list[dict[str, Any]]:
+        """Crop + persist a face snapshot for each newly-LOCKED track.
+
+        Returns a list of lock-event payloads (ready to broadcast). Only the
+        first LOCKED frame for a given track produces an event — further
+        frames are suppressed via `_lock_events_seen`.
+        """
+        if not tracked:
+            return []
+
+        h, w = frame.shape[:2]
+        events: list[dict[str, Any]] = []
+
+        for track in tracked:
+            if track.get("state") != TrackState.LOCKED:
+                continue
+            try:
+                tid = int(track["track_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tid in self._lock_events_seen:
+                continue
+
+            crop_bbox = self._crop_bbox_for(track, w, h)
+            if crop_bbox is None:
+                continue
+            x1, y1, x2, y2 = crop_bbox
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            filename = f"lock_{int(time.time() * 1000)}_{tid}_{uuid.uuid4().hex[:6]}.jpg"
+            path = self.settings.lock_snapshot_dir / filename
+            ok = cv2.imwrite(str(path), crop)
+            if not ok:
+                continue
+
+            self._lock_events_seen.add(tid)
+            similarity = float(track.get("best_similarity") or track.get("similarity") or 0.0)
+            events.append(
+                {
+                    "targetId": f"T{tid}",
+                    "track_id": tid,
+                    "personName": track.get("person_name") or "Unknown",
+                    "personId": track.get("person_id"),
+                    "confidence": round(similarity * 100),
+                    "similarity": similarity,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "imageUrl": f"/api/lock_snapshots/{filename}",
+                }
+            )
+        return events
+
+    @staticmethod
+    def _crop_bbox_for(track, frame_w, frame_h, pad=24) -> tuple[int, int, int, int] | None:
+        """Pick the best bbox to crop: prefer fresh face_info, fall back to
+        predicted face bbox, then top 45% of the person bbox as a last resort.
+        """
+        face_info = track.get("face_info")
+        face_bbox = None
+        if face_info and face_info.get("face_bbox") is not None:
+            face_bbox = face_info["face_bbox"]
+        elif track.get("face_bbox_predicted") is not None:
+            face_bbox = track["face_bbox_predicted"]
+
+        if face_bbox is None:
+            person_bbox = track.get("bbox")
+            if person_bbox is None:
+                return None
+            px1, py1, px2, py2 = (int(v) for v in person_bbox)
+            head_h = max(1, int((py2 - py1) * 0.45))
+            face_bbox = (px1, py1, px2, py1 + head_h)
+
+        x1, y1, x2, y2 = (int(v) for v in face_bbox)
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(frame_w, x2 + pad)
+        y2 = min(frame_h, y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
 
     def _pick_strongest_track(self, tracked: list[dict[str, Any]]) -> dict[str, Any] | None:
         candidates = [item for item in tracked if item["state"] in {TrackState.WATCHING, TrackState.LOCKED}]
@@ -449,6 +545,11 @@ class DetectorRuntime:
         self._stats.persons_count = result["persons_count"]
         self._stats.faces_count = result["faces_count"]
         self._stats.match_count = result["match_count"]
+        # Emit one-time "lock_event" broadcasts per freshly-LOCKED track so
+        # the frontend can drop a marker on the tactical map.
+        for event in result.get("fresh_locks", []):
+            self._broadcast({"type": "lock_event", "data": event})
+
         if holding_previous_track:
             return
         self._send_detection_if_changed(result["detection"])

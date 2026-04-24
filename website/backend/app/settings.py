@@ -21,6 +21,8 @@ class AppSettings:
     snapshot_dir: Path
     recording_dir: Path
     training_dir: Path
+    upload_dir: Path
+    lock_snapshot_dir: Path
     missing_persons_db_dir: Path
     camera_source: int | str
     camera_width: int
@@ -40,11 +42,15 @@ class AppSettings:
         snapshot_dir = website_root / "data" / "snapshots"
         recording_dir = website_root / "data" / "recordings"
         training_dir = website_root / "data" / "training_runs"
+        upload_dir = website_root / "data" / "uploads"
+        lock_snapshot_dir = website_root / "data" / "lock_snapshots"
         missing_persons_db_dir = project_root / "missing_persons_db"
 
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         recording_dir.mkdir(parents=True, exist_ok=True)
         training_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        lock_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
         db_default = missing_persons_db_dir / "embeddings.pkl"
 
@@ -56,8 +62,10 @@ class AppSettings:
             snapshot_dir=snapshot_dir,
             recording_dir=recording_dir,
             training_dir=training_dir,
+            upload_dir=upload_dir,
+            lock_snapshot_dir=lock_snapshot_dir,
             missing_persons_db_dir=missing_persons_db_dir,
-            camera_source=_parse_camera_source(os.getenv("LOST_PERSON_CAMERA_SOURCE", "1")),
+            camera_source=_parse_camera_source(os.getenv("LOST_PERSON_CAMERA_SOURCE", "0")),
             camera_width=int(os.getenv("LOST_PERSON_CAMERA_WIDTH", "1280")),
             camera_height=int(os.getenv("LOST_PERSON_CAMERA_HEIGHT", "720")),
             frame_skip=int(os.getenv("LOST_PERSON_FRAME_SKIP", "5")),

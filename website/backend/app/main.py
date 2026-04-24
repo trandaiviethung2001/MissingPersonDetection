@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -12,6 +14,10 @@ from fastapi.staticfiles import StaticFiles
 from .detector_service import DetectorRuntime
 from .settings import AppSettings
 from .training_service import TrainingService
+from .upload_service import UploadService
+
+
+ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg"}
 
 
 class ConnectionManager:
@@ -49,6 +55,7 @@ settings = AppSettings.load()
 manager = ConnectionManager()
 runtime = DetectorRuntime(settings=settings, broadcaster=manager.broadcast_from_thread)
 training_service = TrainingService(settings=settings)
+upload_service = UploadService(settings=settings)
 
 app = FastAPI(title="Drone Lost Person Finder Backend")
 app.add_middleware(
@@ -118,6 +125,81 @@ async def run_training() -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     runtime.reload_pipeline()
     return {"ok": True, "training": result}
+
+
+@app.get("/upload")
+async def upload_page() -> FileResponse:
+    return FileResponse(settings.frontend_dir / "upload.html")
+
+
+@app.post("/api/upload")
+async def api_upload(
+    video: UploadFile = File(...),
+    threshold: float | None = Form(default=None),
+    frame_skip: int | None = Form(default=None),
+) -> dict[str, Any]:
+    filename = video.filename or "uploaded.mp4"
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {ext or '(none)'}."
+            f" Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTS))}",
+        )
+
+    upload_id = uuid.uuid4().hex[:10]
+    input_path = settings.upload_dir / f"{upload_id}_input{ext}"
+    output_path = settings.upload_dir / f"{upload_id}_annotated.mp4"
+
+    # Stream the upload to disk (handles large files without loading into RAM)
+    with open(input_path, "wb") as f:
+        while True:
+            chunk = await video.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+
+    try:
+        detections = await upload_service.process(
+            input_path=input_path,
+            output_path=output_path,
+            threshold=threshold,
+            frame_skip=frame_skip,
+        )
+    except Exception as exc:  # pragma: no cover - surface pipeline failure as HTTP 500
+        raise HTTPException(status_code=500, detail=f"Detection failed: {exc}") from exc
+
+    summary = upload_service.summarize(detections)
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "original_filename": filename,
+        "video_url": f"/api/uploads/{output_path.name}",
+        "detections": detections,
+        "summary": summary,
+    }
+
+
+@app.get("/api/uploads/{filename}")
+async def api_upload_file(filename: str) -> FileResponse:
+    # Guard against path traversal — must be a bare filename
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = settings.upload_dir / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
+
+
+@app.get("/api/lock_snapshots/{filename}")
+async def api_lock_snapshot(filename: str) -> FileResponse:
+    # Same path-traversal guard as uploads
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = settings.lock_snapshot_dir / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.websocket("/ws")
