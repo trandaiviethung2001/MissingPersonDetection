@@ -13,12 +13,21 @@ async function fetchPeople() {
         return;
     }
 
-    peopleList.innerHTML = data.people.map((person) => `
-        <div class="person-item">
-            <div class="person-item-title">${person.person_id} - ${person.name}</div>
-            <div class="person-item-meta">${person.image_count} image(s)</div>
-        </div>
-    `).join("");
+    peopleList.innerHTML = data.people.map((person) => {
+        const thumbs = (person.images || []).map((image) => `
+            <img class="person-item-thumb"
+                 src="/api/training/person/${encodeURIComponent(person.person_id)}/image/${encodeURIComponent(image)}"
+                 alt="${person.name} - ${image}"
+                 loading="lazy">
+        `).join("");
+        return `
+            <div class="person-item">
+                <div class="person-item-title">${person.person_id} - ${person.name}</div>
+                <div class="person-item-meta">${person.image_count} image(s)</div>
+                <div class="person-item-thumbs">${thumbs}</div>
+            </div>
+        `;
+    }).join("");
 }
 
 trainingForm.addEventListener("submit", async (event) => {

@@ -138,6 +138,11 @@ async def api_upload(
     threshold: float | None = Form(default=None),
     frame_skip: int | None = Form(default=None),
 ) -> dict[str, Any]:
+    """Accept the upload, kick off detection in the background, return a job id.
+
+    The frontend then polls ``GET /api/upload/{job_id}`` to drive its
+    progress bar and pick up the final result.
+    """
     filename = video.filename or "uploaded.mp4"
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_VIDEO_EXTS:
@@ -159,25 +164,32 @@ async def api_upload(
                 break
             f.write(chunk)
 
-    try:
-        detections = await upload_service.process(
-            input_path=input_path,
-            output_path=output_path,
-            threshold=threshold,
-            frame_skip=frame_skip,
-        )
-    except Exception as exc:  # pragma: no cover - surface pipeline failure as HTTP 500
-        raise HTTPException(status_code=500, detail=f"Detection failed: {exc}") from exc
+    job_id = upload_service.create_job(
+        input_path=input_path,
+        output_path=output_path,
+        original_filename=filename,
+        threshold=threshold,
+        frame_skip=frame_skip,
+    )
+    # Detection is CPU-heavy; run it as a background asyncio task so the
+    # POST returns immediately and the frontend can start polling status.
+    asyncio.create_task(upload_service.run_job(job_id))
 
-    summary = upload_service.summarize(detections)
     return {
         "ok": True,
+        "job_id": job_id,
         "upload_id": upload_id,
         "original_filename": filename,
-        "video_url": f"/api/uploads/{output_path.name}",
-        "detections": detections,
-        "summary": summary,
+        "status_url": f"/api/upload/{job_id}",
     }
+
+
+@app.get("/api/upload/{job_id}")
+async def api_upload_status(job_id: str) -> dict[str, Any]:
+    job = upload_service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/api/uploads/{filename}")
@@ -188,6 +200,19 @@ async def api_upload_file(filename: str) -> FileResponse:
     path = settings.upload_dir / filename
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
+
+
+@app.get("/api/training/person/{person_id}/image/{filename}")
+async def api_training_person_image(person_id: str, filename: str) -> FileResponse:
+    for segment in (person_id, filename):
+        if "/" in segment or "\\" in segment or ".." in segment:
+            raise HTTPException(status_code=400, detail="Invalid path")
+    if not person_id.startswith("person_"):
+        raise HTTPException(status_code=400, detail="Invalid person id")
+    path = settings.missing_persons_db_dir / person_id / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(path)
 
 

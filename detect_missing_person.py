@@ -97,7 +97,9 @@ class MissingPersonPipeline:
                 # Only draw LOCKED tracks on skipped frames — redrawing every
                 # active track was adding a putText per bbox per skipped frame
                 # which noticeably dragged down the capture FPS.
-                predictions = self.person_tracker.get_predicted_boxes(locked_only=True)
+                predictions = self.person_tracker.peek_predicted_at_time(
+                    time.monotonic(), locked_only=True
+                )
                 for pred in predictions:
                     draw_predicted_track(frame, pred)
                 active_tracks = self.person_tracker._active_tracks()
@@ -133,13 +135,15 @@ class MissingPersonPipeline:
                     match_count += 1
 
             tracked_person_bboxes = {tuple(t["bbox"]) for t in tracking["tracked"]}
+            person_conf_by_bbox = {tuple(p["bbox"]): p["confidence"] for p in persons}
             for person in persons:
                 pbbox = tuple(person["bbox"])
                 already_tracked = any(
                     _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
                 )
                 if not already_tracked:
-                    draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
+                    draw_person_box(frame, person["bbox"], config.PERSON_COLOR,
+                                    score=person["confidence"])
 
             for face_info in face_results:
                 pbbox = tuple(face_info["person_bbox"])
@@ -147,22 +151,29 @@ class MissingPersonPipeline:
                     _bbox_overlap(pbbox, tb) > 0.3 for tb in tracked_person_bboxes
                 )
                 if not already_drawn:
-                    draw_person_box(frame, face_info["person_bbox"], config.PERSON_COLOR)
-                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                    draw_person_box(frame, face_info["person_bbox"], config.PERSON_COLOR,
+                                    score=person_conf_by_bbox.get(pbbox))
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
         else:
             for person in persons:
-                draw_person_box(frame, person["bbox"], config.PERSON_COLOR)
+                draw_person_box(frame, person["bbox"], config.PERSON_COLOR,
+                                score=person["confidence"])
 
             for face_info in face_results:
                 embedding = face_info.get("embedding")
                 if embedding is None:
-                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200))
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
                     continue
 
                 name, similarity, person_id = self.face_recognizer.match(embedding)
                 if name is not None:
                     match_count += 1
                     draw_alert(frame, face_info, name, similarity)
+                else:
+                    draw_face_box(frame, face_info["face_bbox"], (200, 200, 200),
+                                  score=face_info.get("det_score"))
 
         if config.TACTICAL_MAP_ENABLED and tracking.get("active"):
             draw_tactical_map(frame, tracking["active"])
@@ -183,18 +194,30 @@ class MissingPersonPipeline:
 
 
 def setup_video_writer(cap, output_path):
-    """Create VideoWriter matching source FPS and resolution."""
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    """Create VideoWriter matching source FPS and resolution.
+
+    Falls back to 30.0 fps when the source reports 0 (common for webcams and
+    some RTSP streams) — VideoWriter(fps=0) produces a broken mp4. Keeps the
+    value as a float so 29.97-style rates aren't silently rounded to 29,
+    which would drift audio/video out of sync on later re-encodes.
+    """
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
 
-def draw_person_box(frame, bbox, color, label=None):
-    """Draw bounding box for a person."""
+def draw_person_box(frame, bbox, color, label=None, score=None):
+    """Draw bounding box for a person.
+
+    If ``label`` is None but ``score`` is provided, auto-formats "NN%".
+    Explicit ``label`` wins (lets LOCKED/WATCHING keep their rich text).
+    """
     x1, y1, x2, y2 = bbox
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    if label is None and score is not None:
+        label = f"{float(score) * 100:.0f}%"
     if label:
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
                                        config.FONT_SCALE, config.FONT_THICKNESS)
@@ -204,10 +227,14 @@ def draw_person_box(frame, bbox, color, label=None):
                     (255, 255, 255), config.FONT_THICKNESS)
 
 
-def draw_face_box(frame, face_bbox, color):
-    """Draw bounding box for a face."""
+def draw_face_box(frame, face_bbox, color, score=None):
+    """Draw bounding box for a face. Writes "NN%" below the box when given."""
     x1, y1, x2, y2 = face_bbox
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    if score is not None:
+        label = f"{float(score) * 100:.0f}%"
+        cv2.putText(frame, label, (x1, y2 + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
 
 def draw_alert(frame, face_info, name, similarity):
@@ -216,7 +243,8 @@ def draw_alert(frame, face_info, name, similarity):
     label = f"MISSING: {name} ({confidence:.0f}%)"
 
     draw_person_box(frame, face_info["person_bbox"], config.ALERT_COLOR, label)
-    draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR)
+    draw_face_box(frame, face_info["face_bbox"], config.FACE_COLOR,
+                  score=face_info.get("det_score"))
 
     x1, y1, x2, y2 = face_info["face_bbox"]
     cv2.putText(frame, "! ALERT !", (x1, y1 - 10),
@@ -230,11 +258,14 @@ def draw_tracked_person(frame, track_info):
     name = track_info.get("person_name")
     tid = track_info.get("track_id", "")
     best_sim = track_info.get("best_similarity", 0)
+    person_conf = track_info.get("person_conf")
+    face_info = track_info.get("face_info")
+    face_score = face_info.get("det_score") if face_info else None
 
     def _face_bbox_for(track):
-        face_info = track.get("face_info")
-        if face_info and face_info.get("face_bbox") is not None:
-            return face_info["face_bbox"]
+        fi = track.get("face_info")
+        if fi and fi.get("face_bbox") is not None:
+            return fi["face_bbox"]
         return track.get("face_bbox_predicted")
 
     if state == TrackState.LOCKED:
@@ -249,7 +280,7 @@ def draw_tracked_person(frame, track_info):
 
         face_bbox = _face_bbox_for(track_info)
         if face_bbox is not None:
-            draw_face_box(frame, face_bbox, config.FACE_COLOR)
+            draw_face_box(frame, face_bbox, config.FACE_COLOR, score=face_score)
 
     elif state == TrackState.WATCHING:
         sim = track_info.get("similarity", 0)
@@ -257,10 +288,10 @@ def draw_tracked_person(frame, track_info):
         draw_person_box(frame, bbox, config.WATCHING_COLOR, label)
         face_bbox = _face_bbox_for(track_info)
         if face_bbox is not None:
-            draw_face_box(frame, face_bbox, config.FACE_COLOR)
+            draw_face_box(frame, face_bbox, config.FACE_COLOR, score=face_score)
 
     else:
-        draw_person_box(frame, bbox, config.PERSON_COLOR)
+        draw_person_box(frame, bbox, config.PERSON_COLOR, score=person_conf)
 
 
 def draw_predicted_track(frame, pred):
@@ -471,12 +502,21 @@ def parse_video_source(source):
 
 
 def main(video_path, output_path=None, threshold=None,
-         frame_skip=None, no_display=False):
-    """Main pipeline for missing person detection in video or webcam."""
+         frame_skip=None, no_display=False, progress_callback=None):
+    """Main pipeline for missing person detection in video or webcam.
+
+    Args:
+        progress_callback: optional ``callable(frames_done, frames_total)``
+            invoked periodically while processing a finite video. Used by the
+            web UI to drive a progress bar. Ignored for live sources where
+            ``frames_total == 0``.
+    """
     embeddings_path = resolve_latest_embeddings_path(config.EMBEDDINGS_FILE, config.MISSING_PERSONS_DB_DIR)
     thresh = threshold or config.RECOGNITION_THRESHOLD
     skip = frame_skip or config.FRAME_SKIP
     display = (not no_display) and config.DISPLAY_OUTPUT
+
+    video_path = parse_video_source(video_path)
 
     is_live = isinstance(video_path, int) or (
         isinstance(video_path, str) and video_path.startswith(("rtsp://", "http://", "https://"))
@@ -623,8 +663,23 @@ def main(video_path, output_path=None, threshold=None,
                   f"FPS: {current_fps:.1f} | Persons: {len(persons)} | "
                   f"Faces: {len(face_results)} | Active tracks: {active_tracks}")
 
+        # Optional progress callback for the web UI's loading bar. Fired
+        # every few frames to avoid lock contention on the job-state dict.
+        if progress_callback is not None and not is_live and total_frames > 0:
+            if frame_count % 5 == 0 or frame_count == total_frames:
+                try:
+                    progress_callback(frame_count, total_frames)
+                except Exception:
+                    pass  # never let UI plumbing kill the detection loop
+
 
     # === 9. Cleanup and report ===
+    if progress_callback is not None and not is_live and total_frames > 0:
+        try:
+            progress_callback(total_frames, total_frames)
+        except Exception:
+            pass
+
     cap.release()
     if writer:
         writer.release()

@@ -32,6 +32,7 @@ class AppSettings:
     jpeg_quality: int
     stream_fps: float
     db_path: Path
+    
 
     @classmethod
     def load(cls) -> "AppSettings":

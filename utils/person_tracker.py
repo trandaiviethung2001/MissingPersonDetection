@@ -64,6 +64,11 @@ class TrackedPerson:
         self.consecutive_above = 0
         self.watching_scores = []
         self.has_high_frame = False
+        # Count consecutive WATCHING frames without a face detection. Used to
+        # escape WATCHING when the subject turns away / is occluded — otherwise
+        # the track sits in WATCHING forever because the max_watching_frames
+        # timer only ticks when a face score arrives.
+        self.watching_no_face_frames = 0
 
         # LOCKED re-verify counters
         self.frames_since_verify = 0
@@ -87,6 +92,11 @@ class TrackedPerson:
         # predicted person bbox so the green face overlay tracks the person
         # between face-detection frames instead of disappearing.
         self.last_face_offset = None  # (dx1, dy1, dx2, dy2) or None
+
+        # Wall-clock timestamps so we can interpolate the bbox smoothly
+        # between detections instead of jumping by full velocity per frame.
+        self.last_detection_time = None       # time of latest update_appearance()
+        self.detection_interval_sec = None    # seconds between two most recent updates
 
         # --- Bbox-lost tracking (wall-clock) ---
         self.last_bbox_seen_time = None   # set by PersonTracker
@@ -122,6 +132,7 @@ class TrackedPerson:
             self.color_histogram = 0.7 * self.color_histogram + 0.3 * hist
 
         actual_bbox = (x1, y1, x2, y2)
+        now = time.monotonic()
 
         # Velocity: compute from last ACTUAL detection, not last drawn/predicted bbox.
         # Value is displacement per processed frame (one full frame_skip cycle).
@@ -131,6 +142,14 @@ class TrackedPerson:
             curr_cx = (x1 + x2) / 2
             curr_cy = (y1 + y2) / 2
             self.velocity = (curr_cx - prev_cx, curr_cy - prev_cy)
+
+        # Track wall-clock interval between detections for smooth time-based
+        # interpolation on stream frames.
+        if self.last_detection_time is not None:
+            interval = now - self.last_detection_time
+            if interval > 0.001:
+                self.detection_interval_sec = interval
+        self.last_detection_time = now
 
         self.last_detection_bbox = actual_bbox
         self.last_bbox = actual_bbox
@@ -183,6 +202,34 @@ class TrackedPerson:
         dx, dy = self.velocity
         return (int(x1 + dx), int(y1 + dy), int(x2 + dx), int(y2 + dy))
 
+    def predict_at_time(self, now):
+        """Smoothly interpolate the bbox at a given wall-clock time.
+
+        Velocity is in pixels per processed-frame cycle. We scale it by
+        ``elapsed / detection_interval`` so the bbox slides continuously
+        between detections instead of jumping by a full step on each one.
+        Falls back to the last actual detection bbox if we don't yet have
+        enough history to interpolate.
+        """
+        if self.last_detection_bbox is None:
+            return None
+        if self.last_detection_time is None or self.detection_interval_sec is None:
+            return self.last_detection_bbox
+        elapsed = now - self.last_detection_time
+        if elapsed <= 0:
+            return self.last_detection_bbox
+        # Fraction of the expected detection interval that's elapsed.
+        # Clamp so we don't extrapolate wildly when a detection is overdue.
+        t = max(0.0, min(1.5, elapsed / self.detection_interval_sec))
+        dx, dy = self.velocity
+        x1, y1, x2, y2 = self.last_detection_bbox
+        return (
+            int(x1 + dx * t),
+            int(y1 + dy * t),
+            int(x2 + dx * t),
+            int(y2 + dy * t),
+        )
+
     # ------------------------------------------------------------------
     # State machine
     # ------------------------------------------------------------------
@@ -212,7 +259,12 @@ class TrackedPerson:
 
         if self.state == TrackState.WATCHING:
             if not face_detected:
+                self.watching_no_face_frames += 1
+                if self.watching_no_face_frames >= self.max_watching_frames:
+                    self._reset_to_idle()
+                    return "IDLE_RESET"
                 return None
+            self.watching_no_face_frames = 0
             return self._handle_watching(similarity)
 
         # LOCKED – tracker is primary, only re-verify periodically
@@ -309,11 +361,26 @@ class TrackedPerson:
         self.consecutive_above = 0
         self.watching_scores = []
         self.has_high_frame = False
+        self.watching_no_face_frames = 0
         self.frames_since_verify = 0
         self.consecutive_verify_fails = 0
+        self.frames_since_face = 0
         # Appearance model (so stale colors don't haunt future matches)
         self.color_histogram = None
         self.velocity = (0.0, 0.0)
+        # Bbox state — without this, next update_appearance computes velocity
+        # from the OLD person's position, producing one frame of wrong motion,
+        # and bbox_history leaks the previous identity's trail into the
+        # tactical map if this slot re-LOCKs onto someone else.
+        self.last_bbox = None
+        self.last_detection_bbox = None
+        self.bbox_history = []
+        self.last_face_offset = None
+        self.last_bbox_seen_time = None
+        # Time-based prediction state — must reset too, otherwise a recycled
+        # slot would keep using the previous person's interval / velocity.
+        self.last_detection_time = None
+        self.detection_interval_sec = None
 
 
 # ======================================================================
@@ -349,7 +416,8 @@ class PersonTracker:
                  reverify_max_fails=3,
                  bbox_lost_timeout=2.0,
                  predict_draw_timeout=0.5,
-                 out_of_frame_margin=0.6):
+                 out_of_frame_margin=0.6,
+                 nonlocked_stale_timeout=10.0):
         self.byte_tracker = sv.ByteTrack(
             track_activation_threshold=track_activation_threshold,
             lost_track_buffer=lost_track_buffer,
@@ -370,6 +438,7 @@ class PersonTracker:
         self.bbox_lost_timeout = bbox_lost_timeout        # seconds — full drop after occlusion
         self.predict_draw_timeout = predict_draw_timeout  # seconds — stop drawing phantom boxes
         self.out_of_frame_margin = out_of_frame_margin    # drop if >this fraction of bbox exits the frame
+        self.nonlocked_stale_timeout = nonlocked_stale_timeout  # seconds — sweep IDLE/WATCHING orphans
         self._frame_shape = None                          # (h, w) – learned on each update
         self.tracked_persons: dict[int, TrackedPerson] = {}
 
@@ -394,6 +463,10 @@ class PersonTracker:
         if not person_detections:
             self._tick_lost_tracks(now)
             self._drop_out_of_frame_tracks(now)
+            # Without detections the main-path _cleanup never runs, which
+            # would let IDLE/WATCHING orphans accumulate indefinitely when
+            # the scene is empty. Sweep them here too.
+            self._cleanup(active_ids=set())
             return {
                 "tracked": [],
                 "alerts": [],
@@ -427,6 +500,11 @@ class PersonTracker:
                 tid = int(tid)
                 active_ids.add(tid)
                 bbox = tuple(tracked_dets.xyxy[i].astype(int))
+                person_conf = (
+                    float(tracked_dets.confidence[i])
+                    if tracked_dets.confidence is not None
+                    else None
+                )
 
                 # Detect ByteTrack id reuse: the same track_id can be recycled
                 # for a different person if the original track is lost for a
@@ -486,6 +564,7 @@ class PersonTracker:
                     "person_id": tp.person_id,
                     "similarity": similarity,
                     "best_similarity": tp.best_similarity,
+                    "person_conf": person_conf,
                     "face_info": face_info,
                     "face_bbox_predicted": tp.current_face_bbox(),
                     "velocity": tp.velocity,
@@ -518,6 +597,7 @@ class PersonTracker:
                     "person_id": tp.person_id,
                     "similarity": 0.0,
                     "best_similarity": tp.best_similarity,
+                    "person_conf": None,
                     "face_info": None,
                     "face_bbox_predicted": tp.current_face_bbox(),
                     "velocity": tp.velocity,
@@ -526,13 +606,8 @@ class PersonTracker:
         # --- Drop LOCKED tracks whose predicted bbox left the frame ---
         self._drop_out_of_frame_tracks(now, exclude=active_ids)
 
-        # --- Check bbox-lost timeout for LOCKED tracks ---
-        lost_drops = self._tick_lost_tracks(now, exclude=active_ids)
-        for drop_tid in lost_drops:
-            tp = self.tracked_persons.get(drop_tid)
-            if tp:
-                print(f"  [Tracker] T{drop_tid} LOCKED -> IDLE "
-                      f"(bbox lost > {self.bbox_lost_timeout:.1f}s)")
+        # --- Check bbox-lost timeout for LOCKED tracks (logs inside) ---
+        self._tick_lost_tracks(now, exclude=active_ids)
 
         self._cleanup(active_ids)
 
@@ -541,40 +616,6 @@ class PersonTracker:
             "alerts": alerts,
             "active": self._active_tracks(),
         }
-
-    def get_predicted_boxes(self, locked_only=True):
-        """Return predicted bboxes for tracked persons (for skipped frames).
-
-        Advances `last_bbox` by velocity so consecutive skipped frames step forward.
-        Velocity itself is NOT mutated here — it stays locked to the last two actual
-        detections, so the prediction cadence matches the object's real motion.
-
-        Skips phantom predictions: if a track hasn't had any real detection for
-        longer than `predict_draw_timeout`, stop drawing it even while the track
-        is still waiting on `bbox_lost_timeout` to fully drop.
-
-        Args:
-            locked_only: if True, only LOCKED persons (back-compat, smoother overlay).
-                         If False, returns all active tracks with their state.
-        """
-        now = time.monotonic()
-        results = []
-        for tp in self.tracked_persons.values():
-            if locked_only and tp.state != TrackState.LOCKED:
-                continue
-            if tp.last_bbox is None:
-                continue
-            # Don't draw phantom boxes for tracks whose actual detection has
-            # been missing too long — they're almost certainly out of frame.
-            if (tp.last_bbox_seen_time is not None
-                    and (now - tp.last_bbox_seen_time) > self.predict_draw_timeout):
-                continue
-            predicted = tp.predict_next_bbox()
-            if predicted is None:
-                continue
-            tp.last_bbox = predicted
-            results.append(self._prediction_payload(tp, predicted))
-        return results
 
     def peek_predicted_boxes(self, locked_only=True):
         """Return predicted bboxes without advancing tracker state."""
@@ -585,6 +626,32 @@ class PersonTracker:
             predicted = tp.predict_next_bbox()
             if predicted:
                 results.append(self._prediction_payload(tp, predicted))
+        return results
+
+    def peek_predicted_at_time(self, now, locked_only=False):
+        """Return time-interpolated bboxes for all (or only LOCKED) tracks.
+
+        Use this from the live stream loop on every camera frame so the
+        rendered bbox slides smoothly between detections instead of
+        snapping by a full velocity step at each processed frame.
+
+        Tracks whose actual detection has been missing for longer than
+        ``predict_draw_timeout`` are *not* returned, so the bbox stops being
+        drawn when the target is occluded (for example when someone steps
+        in front of the locked object) — even though the track itself stays
+        alive until ``bbox_lost_timeout`` for possible recovery.
+        """
+        results = []
+        for tp in self.tracked_persons.values():
+            if locked_only and tp.state != TrackState.LOCKED:
+                continue
+            if (tp.last_detection_time is not None
+                    and (now - tp.last_detection_time) > self.predict_draw_timeout):
+                continue
+            predicted = tp.predict_at_time(now)
+            if predicted is None:
+                continue
+            results.append(self._prediction_payload(tp, predicted))
         return results
 
     @staticmethod
@@ -654,12 +721,20 @@ class PersonTracker:
         if not track_entries or not face_results:
             return {}
 
+        # Skip faces with no embedding — they can't be used for identity
+        # matching, so letting them win a greedy assignment would silently
+        # starve a track that another (lower-containment but useful) face
+        # could have matched.
+        usable_faces = [fi for fi in face_results if fi.get("embedding") is not None]
+        if not usable_faces:
+            return {}
+
         scored = []
         for tid, tbbox in track_entries:
             tx1, ty1, tx2, ty2 = tbbox
             tcx = (tx1 + tx2) / 2.0
             tcy = (ty1 + ty2) / 2.0
-            for fi in face_results:
+            for fi in usable_faces:
                 fx1, fy1, fx2, fy2 = fi["face_bbox"]
                 ix1, iy1 = max(tx1, fx1), max(ty1, fy1)
                 ix2, iy2 = min(tx2, fx2), min(ty2, fy2)
@@ -754,6 +829,9 @@ class PersonTracker:
                 continue
             elapsed = now - tp.last_bbox_seen_time
             if elapsed > self.bbox_lost_timeout:
+                name = tp.person_name or "?"
+                print(f"  [Tracker] T{tid} ({name}) LOCKED -> IDLE "
+                      f"(bbox lost > {self.bbox_lost_timeout:.1f}s)")
                 tp._reset_to_idle()
                 del self.tracked_persons[tid]
                 dropped.append(tid)
@@ -776,17 +854,23 @@ class PersonTracker:
 
     def _cleanup(self, active_ids):
         stale = []
+        now = time.monotonic()
         for tid, tp in self.tracked_persons.items():
             if tid in active_ids:
                 continue
             if tp.state == TrackState.LOCKED:
                 # LOCKED tracks are cleaned by bbox-lost timeout, not here
                 continue
-            if tp.state == TrackState.IDLE and tp.total_frames > 0:
-                if tp.last_bbox_seen_time is None:
-                    stale.append(tid)
-                elif time.monotonic() - tp.last_bbox_seen_time > 10.0:
-                    stale.append(tid)
+            # IDLE and WATCHING orphans: if ByteTrack stopped feeding this
+            # track id, the TrackedPerson object otherwise stays forever —
+            # WATCHING in particular had no cleanup path and leaked memory
+            # in long-running streams.
+            if tp.total_frames <= 0:
+                continue
+            if tp.last_bbox_seen_time is None:
+                stale.append(tid)
+            elif now - tp.last_bbox_seen_time > self.nonlocked_stale_timeout:
+                stale.append(tid)
         for tid in stale:
             del self.tracked_persons[tid]
 

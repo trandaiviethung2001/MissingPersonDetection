@@ -833,6 +833,22 @@ body {
     font-family: 'JetBrains Mono', monospace;
 }
 
+.person-item-thumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.person-item-thumb {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: rgba(7, 14, 33, 0.8);
+}
+
 @media (max-width: 960px) {
     .training-layout {
         grid-template-columns: 1fr;
@@ -894,6 +910,65 @@ body {
 .training-result[data-tone="success"] {
     border-color: rgba(60, 200, 140, 0.55);
     color: #b6f6d8;
+}
+
+/* Upload progress bar */
+.upload-progress {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.upload-progress[hidden] {
+    display: none;
+}
+
+.upload-progress-track {
+    width: 100%;
+    height: 10px;
+    border-radius: 6px;
+    background: rgba(7, 14, 33, 0.7);
+    border: 1px solid var(--border-bright);
+    overflow: hidden;
+    position: relative;
+}
+
+.upload-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #2ec27e, #53a2fe);
+    border-radius: 6px;
+    transition: width 200ms ease-out;
+}
+
+.upload-progress.indeterminate .upload-progress-fill {
+    width: 40% !important;
+    animation: upload-progress-slide 1.4s linear infinite;
+    background: linear-gradient(90deg,
+        rgba(83, 162, 254, 0.05),
+        rgba(83, 162, 254, 0.85),
+        rgba(46, 194, 126, 0.85),
+        rgba(46, 194, 126, 0.05));
+}
+
+@keyframes upload-progress-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+.upload-progress-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.upload-progress-meta #upload-progress-pct {
+    color: var(--text);
+    font-weight: 600;
 }
 
 @media (max-width: 720px) {

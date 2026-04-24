@@ -574,15 +574,41 @@ class DetectorRuntime:
 
         frame = fallback_frame.copy()
         if pipeline is not None and pipeline.person_tracker is not None:
-            predicted_ids = set()
-            for pred in pipeline.person_tracker.peek_predicted_boxes():
-                predicted_ids.add(int(pred["track_id"]))
-                draw_predicted_track(frame, pred)
-
-            for track in tracked:
-                if track["state"] == TrackState.LOCKED and int(track["track_id"]) in predicted_ids:
-                    continue
-                draw_tracked_person(frame, track)
+            # Smoothly interpolate every active track's bbox at the current
+            # wall-clock time. This replaces both the old "constant-offset"
+            # peek_predicted_boxes and the stale-cache redraw of WATCHING /
+            # IDLE tracks — both of which made the boxes jump on every
+            # processed frame.
+            now = time.monotonic()
+            smooth = pipeline.person_tracker.peek_predicted_at_time(
+                now, locked_only=False
+            )
+            smooth_ids = set()
+            # Index cached entries by track_id so we can pick up identity /
+            # similarity / face_info that the pipeline already computed last
+            # processed frame.
+            tracked_by_id = {
+                int(t["track_id"]): t
+                for t in tracked
+                if "track_id" in t
+            }
+            for pred in smooth:
+                tid = int(pred["track_id"])
+                smooth_ids.add(tid)
+                cached = tracked_by_id.get(tid)
+                # Merge: smooth bbox wins, identity/face_info from cache.
+                if cached is not None:
+                    merged = {**cached, **pred}
+                else:
+                    merged = pred
+                if merged["state"] == TrackState.LOCKED:
+                    draw_predicted_track(frame, merged)
+                else:
+                    draw_tracked_person(frame, merged)
+            # No cache-only fallback: if peek_predicted_at_time filtered a
+            # track out (e.g. it's been occluded longer than
+            # predict_draw_timeout) we *want* the bbox to disappear instead
+            # of redrawing it from a stale snapshot.
 
         draw_info_overlay(
             frame,
