@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lost-Person Finder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin=""
+    >
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <div class="logo">
+                <span class="logo-text">LOST-PERSON FINDER</span>
+            </div>
+            <div class="status-indicator">
+                <span class="status-label">STATUS:</span>
+                <span class="status-value" id="system-status">IDLE</span>
+            </div>
+        </div>
+        <div class="top-bar-right">
+            <a class="btn btn-info" href="/upload">Upload Video</a>
+            <a class="btn btn-info" href="/training">Quick Training</a>
+            <div class="indicator"><span id="battery-indicator">100%</span></div>
+            <div class="indicator"><span>GPS: <span id="gps-indicator">--</span></span></div>
+            <div class="indicator"><span>Signal: <span id="signal-indicator">100%</span></span></div>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <section class="panel feed-panel">
+            <div class="panel-header">
+                <h2 class="panel-title">AI Detection Feed</h2>
+                <div class="rec-badge" id="rec-badge">
+                    <span class="rec-dot"></span>
+                    <span>REC</span>
+                </div>
+            </div>
+
+            <div class="feed-container" id="feed-container">
+                <img id="video-stream" class="video-stream" alt="">
+                <div class="grid-overlay"></div>
+
+                <div class="confidence-box" id="confidence-box">
+                    <div class="confidence-label">Confidence</div>
+                    <div class="confidence-value" id="confidence-overlay">0%</div>
+                </div>
+
+                <div class="detection-box" id="detection-box">
+                    <span class="detection-label">Target Detected</span>
+                </div>
+
+                <div class="feed-placeholder" id="feed-placeholder">
+                    <p>Awaiting video stream</p>
+                    <p class="placeholder-hint">Camera preview should appear automatically after backend startup</p>
+                </div>
+            </div>
+        </section>
+
+        <aside class="sidebar">
+            <div class="card">
+                <h3 class="card-title">Target Information</h3>
+                <div class="info-row">
+                    <span class="info-label">Target ID:</span>
+                    <span class="info-value accent" id="target-id">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Status:</span>
+                    <span class="info-value" id="target-status">IDLE</span>
+                </div>
+                <div class="info-row progress-row">
+                    <span class="info-label">Confidence:</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill green" id="confidence-bar"></div>
+                    </div>
+                    <span class="info-value small" id="confidence-text">0%</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">AI Status</h3>
+                <div class="ai-status-box" id="ai-status-box">
+                    <span id="ai-status-text">Standby</span>
+                </div>
+                <p class="card-note">Backend uses the shared pipeline from detect_missing_person.py</p>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Processing Telemetry</h3>
+                <div class="telemetry-row">
+                    <div class="telemetry-header">
+                        <span class="info-label">Altitude</span>
+                        <span class="info-value blue" id="altitude-value">0m</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill blue" id="altitude-bar"></div>
+                    </div>
+                </div>
+                <div class="telemetry-row">
+                    <div class="telemetry-header">
+                        <span class="info-label">Speed</span>
+                        <span class="info-value blue" id="speed-value">0 km/h</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill blue" id="speed-bar"></div>
+                    </div>
+                </div>
+                <div class="telemetry-row">
+                    <div class="telemetry-header">
+                        <span class="info-label">Battery</span>
+                        <span class="info-value green" id="battery-value">100%</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill green" id="battery-bar"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Tactical Map</h3>
+                <div class="tactical-map" id="tactical-map"></div>
+                <div class="map-coords-row">
+                    <span class="info-label">Address:</span>
+                    <span class="info-value small" id="map-coords">-</span>
+                </div>
+                <p class="card-note">Map data: OpenStreetMap via Leaflet</p>
+            </div>
+        </aside>
+    </main>
+
+    <footer class="control-panel">
+        <button class="btn btn-primary" id="btn-start"><span>Start Mission</span></button>
+        <button class="btn btn-warning" id="btn-pause" disabled><span>Pause</span></button>
+        <button class="btn btn-secondary" id="btn-lock" disabled><span>Lock Target</span></button>
+        <button class="btn btn-info" id="btn-snapshot"><span>Snapshot</span></button>
+        <button class="btn btn-info" id="btn-record"><span>Record</span></button>
+        <button class="btn btn-danger" id="btn-rtl" disabled><span>Return to Home</span></button>
+        <button class="btn btn-danger btn-emergency" id="btn-emergency"><span>EMERGENCY STOP</span></button>
+    </footer>
+
+    <div class="toast-container" id="toast-container"></div>
+    <script
+        src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""
+    ></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -9,7 +9,7 @@ from ultralytics import YOLO
 class PersonDetector:
     """Detect persons in images/frames using YOLOv8."""
 
-    def __init__(self, model_path="yolov8n.pt", confidence_threshold=0.5):
+    def __init__(self, model_path="yolov8n.pt", confidence_threshold=0.5, image_size=416):
         """
         Args:
             model_path: Path to YOLO model (.pt). Auto-downloads if missing.
@@ -17,6 +17,7 @@ class PersonDetector:
         """
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
+        self.image_size = image_size
         self.person_class_id = 0  # COCO class 0 = "person"
 
     def detect(self, frame):
@@ -31,7 +32,7 @@ class PersonDetector:
                 - "bbox": (x1, y1, x2, y2) bounding box coordinates
                 - "confidence": float confidence score
         """
-        results = self.model(frame, verbose=False)[0]
+        results = self.model(frame, imgsz=self.image_size, verbose=False)[0]
         detections = []
 
         for box in results.boxes:

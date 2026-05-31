@@ -282,7 +282,9 @@ Edit `config.py`:
 | `RECOGNITION_THRESHOLD` | Cosine similarity threshold. Higher = fewer false positives, lower = more matches | 0.4 |
 | `FRAME_SKIP` | Process every N frames. Lower = more accurate, higher = faster | 5 |
 | `INSIGHTFACE_MODEL` | `"buffalo_l"` (accurate) or `"buffalo_s"` (fast) | `"buffalo_l"` |
+| `INSIGHTFACE_DET_SIZE` | InsightFace detector input size. Lower = faster, higher = more accurate | 320 |
 | `YOLO_CONFIDENCE_THRESHOLD` | Person detection confidence | 0.5 |
+| `YOLO_IMAGE_SIZE` | YOLO inference image size. Lower = faster, higher = more accurate | 416 |
 | `FACE_DETECTION_THRESHOLD` | Face detection confidence | 0.5 |
 
 ### Tracking & Locking

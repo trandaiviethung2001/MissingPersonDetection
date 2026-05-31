@@ -9,6 +9,14 @@ import cv2
 from insightface.app import FaceAnalysis
 
 
+def _safe_normalize(vec):
+    """L2-normalize a 1-D embedding, returning None if norm is zero."""
+    norm = np.linalg.norm(vec)
+    if norm <= 0 or not np.isfinite(norm):
+        return None
+    return vec / norm
+
+
 class FaceRecognizer:
     """Match face embeddings against a missing person database."""
 
@@ -42,7 +50,10 @@ class FaceRecognizer:
             embeddings = person["embeddings"]
 
             for emb in embeddings:
-                norm_emb = emb / np.linalg.norm(emb)
+                norm_emb = _safe_normalize(np.asarray(emb, dtype=np.float32))
+                if norm_emb is None:
+                    print(f"[FaceRecognizer] WARNING: skipping zero-norm embedding for {person_id}")
+                    continue
                 self.known_embeddings.append(norm_emb)
                 self.known_names.append(name)
                 self.known_ids.append(person_id)
@@ -65,15 +76,17 @@ class FaceRecognizer:
         if len(self.known_embeddings) == 0:
             return None, 0.0, None
 
-        norm_emb = embedding / np.linalg.norm(embedding)
+        norm_emb = _safe_normalize(np.asarray(embedding, dtype=np.float32))
+        if norm_emb is None:
+            return None, 0.0, None
         similarities = np.dot(self.known_embeddings, norm_emb)
-        max_idx = np.argmax(similarities)
-        max_similarity = similarities[max_idx]
+        max_idx = int(np.argmax(similarities))
+        max_similarity = float(similarities[max_idx])
 
         if max_similarity >= self.threshold:
-            return self.known_names[max_idx], float(max_similarity), self.known_ids[max_idx]
+            return self.known_names[max_idx], max_similarity, self.known_ids[max_idx]
 
-        return None, float(max_similarity), None
+        return None, max_similarity, None
 
     def match_raw(self, embedding):
         """
@@ -88,9 +101,11 @@ class FaceRecognizer:
         if len(self.known_embeddings) == 0:
             return None, 0.0, None
 
-        norm_emb = embedding / np.linalg.norm(embedding)
+        norm_emb = _safe_normalize(np.asarray(embedding, dtype=np.float32))
+        if norm_emb is None:
+            return None, 0.0, None
         similarities = np.dot(self.known_embeddings, norm_emb)
-        max_idx = np.argmax(similarities)
+        max_idx = int(np.argmax(similarities))
         return (self.known_names[max_idx],
                 float(similarities[max_idx]),
                 self.known_ids[max_idx])
