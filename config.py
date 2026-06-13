@@ -7,22 +7,32 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MISSING_PERSONS_DB_DIR = os.path.join(BASE_DIR, "missing_persons_db")
 EMBEDDINGS_FILE = os.path.join(MISSING_PERSONS_DB_DIR, "embeddings.pkl")
-YOLO_MODEL_PATH = "yolov8n.pt"  # Auto-downloads if not found
+YOLO_MODEL_PATH = "yolov8n.engine"  # Auto-downloads if not found
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 YOLO_CONFIDENCE_THRESHOLD = 0.5
 YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "416"))
 YOLO_PERSON_CLASS_ID = 0  # COCO class 0 = "person"
 INSIGHTFACE_MODEL = "buffalo_l"
-INSIGHTFACE_DET_SIZE = int(os.getenv("INSIGHTFACE_DET_SIZE", "320"))
+INSIGHTFACE_DET_SIZE = int(os.getenv("INSIGHTFACE_DET_SIZE", "160"))
 FACE_DETECTION_THRESHOLD = 0.5
 RECOGNITION_THRESHOLD = 0.4
-FRAME_SKIP = 1  # Process every N frames
+FRAME_SKIP = 3  # Process every N frames
 DISPLAY_OUTPUT = True  # Show output video window
 ALERT_COLOR = (0, 0, 255)  # Red - missing person box
 PERSON_COLOR = (255, 200, 0)  # Blue - normal person box
 FACE_COLOR = (0, 255, 0)  # Green - face box
 FONT_SCALE = 0.7
 FONT_THICKNESS = 2
+FACE_SKIP = 2   # run face every 2 frames
+
+# --- Webcam capture ---
+# Match the proven ffplay settings:
+# ffplay -f v4l2 -input_format mjpeg -video_size 1280x720 -framerate 30 /dev/video0
+CAMERA_WIDTH = int(os.getenv("LOST_PERSON_CAMERA_WIDTH", "1280"))
+CAMERA_HEIGHT = int(os.getenv("LOST_PERSON_CAMERA_HEIGHT", "720"))
+CAMERA_FPS = float(os.getenv("LOST_PERSON_CAMERA_FPS", "30"))
+CAMERA_FOURCC = os.getenv("LOST_PERSON_CAMERA_FOURCC", "MJPG")
+CAMERA_BUFFER_SIZE = int(os.getenv("LOST_PERSON_CAMERA_BUFFER_SIZE", "1"))
 
 # --- Tracking (ByteTrack + state machine) ---
 TRACKING_ENABLED = True
@@ -35,7 +45,7 @@ BYTETRACK_LOST_BUFFER = 30            # Frames to keep lost tracks
 BYTETRACK_MATCH_THRESHOLD = 0.8       # IoU threshold for ByteTrack association
 
 # --- LOCKED state: soft lock with periodic re-verification ---
-LOCKED_REVERIFY_INTERVAL = 30         # Re-verify face every N processed frames
+LOCKED_REVERIFY_INTERVAL = 60         # Re-verify face every N processed frames
 LOCKED_REVERIFY_OK = 0.35             # similarity >= this → re-verify passed
 LOCKED_REVERIFY_DROP = 0.25           # similarity < this → re-verify failed
 LOCKED_REVERIFY_MAX_FAILS = 3         # Consecutive re-verify fails → drop track

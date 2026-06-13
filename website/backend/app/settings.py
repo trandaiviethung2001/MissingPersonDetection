@@ -27,6 +27,9 @@ class AppSettings:
     camera_source: int | str
     camera_width: int
     camera_height: int
+    camera_fps: float
+    camera_fourcc: str
+    camera_buffer_size: int
     frame_skip: int
     threshold: float
     jpeg_quality: int
@@ -67,9 +70,12 @@ class AppSettings:
             lock_snapshot_dir=lock_snapshot_dir,
             missing_persons_db_dir=missing_persons_db_dir,
             camera_source=_parse_camera_source(os.getenv("LOST_PERSON_CAMERA_SOURCE", "0")),
-            camera_width=int(os.getenv("LOST_PERSON_CAMERA_WIDTH", "1280")),
-            camera_height=int(os.getenv("LOST_PERSON_CAMERA_HEIGHT", "720")),
-            frame_skip=int(os.getenv("LOST_PERSON_FRAME_SKIP", "5")),
+            camera_width=int(os.getenv("LOST_PERSON_CAMERA_WIDTH", "640")),
+            camera_height=int(os.getenv("LOST_PERSON_CAMERA_HEIGHT", "480")),
+            camera_fps=float(os.getenv("LOST_PERSON_CAMERA_FPS", "30")),
+            camera_fourcc=os.getenv("LOST_PERSON_CAMERA_FOURCC", "MJPG"),
+            camera_buffer_size=int(os.getenv("LOST_PERSON_CAMERA_BUFFER_SIZE", "1")),
+            frame_skip=int(os.getenv("LOST_PERSON_FRAME_SKIP", "3")),
             threshold=float(os.getenv("LOST_PERSON_THRESHOLD", "0.4")),
             jpeg_quality=int(os.getenv("LOST_PERSON_JPEG_QUALITY", "55")),
             stream_fps=float(os.getenv("LOST_PERSON_STREAM_FPS", "24")),

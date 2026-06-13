@@ -13,6 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
+import os
 
 import config
 from utils import PersonDetector, FaceDetector, FaceRecognizer, PersonTracker, TrackState
@@ -41,6 +42,10 @@ class MissingPersonPipeline:
         self.embeddings_path = resolve_latest_embeddings_path(db_path, config.MISSING_PERSONS_DB_DIR)
         self.threshold = threshold or config.RECOGNITION_THRESHOLD
         self.frame_skip = frame_skip or config.FRAME_SKIP
+        os.environ.setdefault('ORT_TENSORRT_ENGINE_CACHE_ENABLE', '1')
+        os.environ.setdefault('ORT_TENSORRT_CACHE_PATH',
+                              os.path.expanduser('~/.cache/trt_engines'))
+        os.environ.setdefault('ORT_TENSORRT_FP16_ENABLE', '1')  # 2 GB
 
         self.person_detector = PersonDetector(
             model_path=config.YOLO_MODEL_PATH,
@@ -50,10 +55,24 @@ class MissingPersonPipeline:
 
         face_app = FaceAnalysis(
             name=config.INSIGHTFACE_MODEL,
-            providers=["CPUExecutionProvider"],
+            providers=["TensorrtExecutionProvider", "CUDAExecutionProvider"],
         )
         face_app.prepare(ctx_id=0, det_size=(config.INSIGHTFACE_DET_SIZE, config.INSIGHTFACE_DET_SIZE))
 
+        print("Warming up TensorRT – building ALL engines...")
+
+        # 1. Force detection model (black image works for detection itself)
+        dummy_frame = np.zeros((config.INSIGHTFACE_DET_SIZE, config.INSIGHTFACE_DET_SIZE, 3),
+                            dtype=np.uint8)
+        _ = face_app.get(dummy_frame)
+
+        # 2. Force recognition model (must be done explicitly!)
+        rec_model = face_app.models.get('recognition')
+        if rec_model is not None:
+            # Random dummy face at the recognition input size (112x112 for buffalo_l)
+            dummy_aligned = np.random.randint(0, 256, (112, 112, 3), dtype=np.uint8)
+            _ = rec_model.get_feat(dummy_aligned)
+        print("Recognition engine built.")
         self.face_detector = FaceDetector(
             app=face_app,
             det_thresh=config.FACE_DETECTION_THRESHOLD,
@@ -696,7 +715,7 @@ def main(video_path, output_path=None, threshold=None,
 
 
 if __name__ == "__main__":
-    video_source = 1
+    video_source = "/dev/video0"  # default to webcam; override with --video
 
     main(
         video_path=video_source,

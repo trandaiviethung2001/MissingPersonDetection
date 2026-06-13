@@ -21,19 +21,27 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from detect_missing_person import (  # noqa: E402
     MissingPersonPipeline,
+    capture_fourcc,
     draw_info_overlay,
     draw_predicted_track,
     draw_tracked_person,
+    open_video_capture,
 )
 from utils import TrackState  # noqa: E402
 
 
 @dataclass(slots=True)
 class RuntimeStats:
+    camera_frame_count: int = 0
     frame_count: int = 0
     processed_count: int = 0
     started_at: float = 0.0
     last_telemetry_at: float = 0.0
+    last_fps_at: float = 0.0
+    last_camera_frame_count: int = 0
+    last_processed_count: int = 0
+    camera_fps: float = 0.0
+    processing_fps: float = 0.0
     persons_count: int = 0
     faces_count: int = 0
     match_count: int = 0
@@ -167,6 +175,8 @@ class DetectorRuntime:
                 "camera_source": self.settings.camera_source,
                 "camera_width": self.settings.camera_width,
                 "camera_height": self.settings.camera_height,
+                "camera_fps": self.settings.camera_fps,
+                "camera_fourcc": self.settings.camera_fourcc,
                 "frame_skip": self.settings.frame_skip,
                 "threshold": self.settings.threshold,
                 "db_path": str(self.settings.db_path),
@@ -229,7 +239,9 @@ class DetectorRuntime:
         try:
             self._initialize_pipeline()
             self._open_capture()
-            self._stats.started_at = time.time()
+            started_at = time.time()
+            with self._lock:
+                self._stats = RuntimeStats(started_at=started_at, last_fps_at=started_at)
             last_stream_sent = 0.0
 
             while not self._stop_event.is_set():
@@ -241,7 +253,8 @@ class DetectorRuntime:
                 now = time.perf_counter()
 
                 with self._lock:
-                    self._latest_frame = frame.copy()
+                    self._stats.camera_frame_count += 1
+                    self._latest_frame = frame
                     mission_active = self._mission_active
                     recording_enabled = self._recording_enabled
                 self._resolve_pending_detection(allow_apply=mission_active)
@@ -298,15 +311,29 @@ class DetectorRuntime:
         with self._lock:
             if self._capture is not None and self._capture.isOpened():
                 return
-            self._capture = cv2.VideoCapture(self.settings.camera_source)
-            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.camera_width)
-            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.camera_height)
-            self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            self._capture = open_video_capture(
+                self.settings.camera_source,
+                width=self.settings.camera_width,
+                height=self.settings.camera_height,
+                fps=self.settings.camera_fps,
+                fourcc=self.settings.camera_fourcc,
+                buffer_size=self.settings.camera_buffer_size,
+            )
+
             if not self._capture.isOpened():
                 self._camera_opened = False
                 raise RuntimeError(f"Cannot open camera/video source: {self.settings.camera_source}")
+
             self._camera_opened = True
             self._last_error = None
+            print(
+                "[DetectorRuntime] Camera opened: "
+                f"{int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+                f"{int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
+                f"@ {self._capture.get(cv2.CAP_PROP_FPS) or 0:.1f} FPS "
+                f"{capture_fourcc(self._capture)}"
+            )
 
     def _read_frame(self):
         with self._lock:
@@ -329,10 +356,14 @@ class DetectorRuntime:
         return None
 
     def _normalize_frame(self, frame):
-        target_size = (self.settings.camera_width, self.settings.camera_height)
+        target_w = min(int(self.settings.camera_width), frame.shape[1])
+        target_h = min(int(self.settings.camera_height), frame.shape[0])
+        target_size = (target_w, target_h)
         current_size = (frame.shape[1], frame.shape[0])
+
         if current_size == target_size:
             return frame
+
         return cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
 
     def _process_detection_frame(self, frame, pipeline: MissingPersonPipeline) -> dict[str, Any]:
@@ -560,6 +591,7 @@ class DetectorRuntime:
             mission_active = self._mission_active
             tracked = list(self._latest_tracked)
             stats = {
+                "camera_fps": self._stats.camera_fps,
                 "frame_count": self._stats.frame_count,
                 "processed_count": self._stats.processed_count,
                 "persons_count": self._stats.persons_count,
@@ -613,7 +645,7 @@ class DetectorRuntime:
         draw_info_overlay(
             frame,
             stats["frame_count"],
-            pipeline.current_fps() if pipeline is not None else 0.0,
+            stats["camera_fps"],
             stats["persons_count"],
             stats["faces_count"],
             stats["match_count"],
@@ -647,19 +679,38 @@ class DetectorRuntime:
         if now - self._stats.last_telemetry_at < 1.0:
             return
         self._stats.last_telemetry_at = now
+        self._update_fps_stats(now)
         self._broadcast({"type": "telemetry", "data": self._build_telemetry()})
 
+    def _update_fps_stats(self, now: float) -> None:
+        with self._lock:
+            elapsed = now - self._stats.last_fps_at
+            if elapsed <= 0:
+                return
+
+            camera_frames = self._stats.camera_frame_count - self._stats.last_camera_frame_count
+            processed_frames = self._stats.processed_count - self._stats.last_processed_count
+
+            self._stats.camera_fps = camera_frames / elapsed
+            self._stats.processing_fps = processed_frames / elapsed
+            self._stats.last_camera_frame_count = self._stats.camera_frame_count
+            self._stats.last_processed_count = self._stats.processed_count
+            self._stats.last_fps_at = now
+
     def _build_telemetry(self) -> dict[str, Any]:
-        elapsed = max(0.001, time.time() - self._stats.started_at) if self._stats.started_at else 0.001
-        processed_fps = self._stats.processed_count / elapsed if elapsed > 0 else 0.0
-        mission_active = self._mission_active
+        with self._lock:
+            processing_fps = self._stats.processing_fps
+            camera_fps = self._stats.camera_fps
+            mission_active = self._mission_active
+            camera_opened = self._camera_opened
         return {
             "altitude": 12 if mission_active else 0,
-            "speed": round(min(40.0, processed_fps * 2.0), 1),
+            "speed": round(min(40.0, camera_fps * 2.0), 1),
             "battery": 100,
             "signal": 100,
-            "processingFps": round(processed_fps, 2),
-            "cameraOpened": self._camera_opened,
+            "cameraFps": round(camera_fps, 2),
+            "processingFps": round(processing_fps, 2),
+            "cameraOpened": camera_opened,
         }
 
     def _write_recording(self, frame) -> None:

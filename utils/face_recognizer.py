@@ -8,6 +8,8 @@ import numpy as np
 import cv2
 from insightface.app import FaceAnalysis
 
+import config
+
 
 def _safe_normalize(vec):
     """L2-normalize a 1-D embedding, returning None if norm is zero."""
@@ -134,8 +136,11 @@ class FaceRecognizer:
             List[dict]: The built database.
         """
         if app is None:
-            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            app.prepare(ctx_id=0, det_size=(640, 640))
+            app = FaceAnalysis(
+                name=config.INSIGHTFACE_MODEL,
+                providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
+            )
+            app.prepare(ctx_id=0, det_size=(config.INSIGHTFACE_DET_SIZE, config.INSIGHTFACE_DET_SIZE))
 
         database = []
         image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

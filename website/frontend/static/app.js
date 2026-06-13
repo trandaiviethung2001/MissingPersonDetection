@@ -27,6 +27,7 @@ function cacheElements() {
         "target-id", "target-status", "confidence-bar", "confidence-text",
         "ai-status-box", "ai-status-text",
         "altitude-value", "altitude-bar", "speed-value", "speed-bar",
+        "camera-fps-value", "camera-fps-bar", "processing-fps-value", "processing-fps-bar",
         "battery-value", "battery-bar",
         "btn-start", "btn-pause", "btn-lock", "btn-snapshot",
         "btn-record", "btn-rtl", "btn-emergency",
@@ -182,6 +183,16 @@ function updateTelemetry(data) {
     if (data.speed != null) {
         el.speedValue.textContent = data.speed.toFixed(1) + " km/h";
         el.speedBar.style.width = Math.min(100, data.speed * 5) + "%";
+    }
+
+    if (data.cameraFps != null) {
+        el.cameraFpsValue.textContent = data.cameraFps.toFixed(1);
+        el.cameraFpsBar.style.width = Math.min(100, data.cameraFps / 30 * 100) + "%";
+    }
+
+    if (data.processingFps != null) {
+        el.processingFpsValue.textContent = data.processingFps.toFixed(1);
+        el.processingFpsBar.style.width = Math.min(100, data.processingFps / 10 * 100) + "%";
     }
 }
 
